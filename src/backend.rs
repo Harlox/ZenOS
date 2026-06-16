@@ -32,7 +32,7 @@ use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::drm::control::{connector, Device as _};
 use smithay::reexports::rustix::fs::OFlags;
-use smithay::utils::DeviceFd;
+use smithay::utils::{DeviceFd, Logical, Point};
 
 use crate::state::ZenState;
 
@@ -76,14 +76,14 @@ impl Gpu {
         let elements = [
             SolidColorRenderElement::from_buffer(
                 &self.bar_buf,
-                (0, 0).into(),
+                Point::<i32, Logical>::from((0, 0)),
                 1.0,
                 1.0,
                 Kind::Unspecified,
             ),
             SolidColorRenderElement::from_buffer(
                 &self.dock_buf,
-                (dock_x, dock_y).into(),
+                Point::<i32, Logical>::from((dock_x, dock_y)),
                 1.0,
                 1.0,
                 Kind::Unspecified,
