@@ -16,16 +16,15 @@
 use std::time::Duration;
 
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
-use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode, NodeType};
+use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{primary_gpu, all_gpus, UdevBackend, UdevEvent};
 use smithay::reexports::calloop::EventLoop;
+use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::DeviceFd;
-
-use rustix::fs::OFlags;
 
 use crate::state::ZenState;
 
@@ -83,7 +82,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     handle.insert_source(session_notifier, move |event, _, data| match event {
         SessionEvent::PauseSession => {
             tracing::info!("session paused");
-            if let Some(gpu) = &data.gpu {
+            if let Some(gpu) = &mut data.gpu {
                 gpu.drm.pause();
             }
         }

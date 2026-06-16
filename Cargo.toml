@@ -16,7 +16,6 @@ smithay = { version = "0.7", default-features = false, features = [
     "renderer_gl",
     "wayland_frontend",
 ] }
-rustix = { version = "0.38", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
