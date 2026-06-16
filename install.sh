@@ -5,22 +5,15 @@ echo "=== ZenOS Install Script ==="
 # Mise à jour système
 sudo pacman -Syu --noconfirm
 
-# Dépendances
+# Dépendances minimales
 sudo pacman -S --noconfirm \
   git \
   curl \
   base-devel \
-  pkgconf \
-  wayland \
-  libxkbcommon \
-  libxcursor \
-  libxi \
-  libx11 \
   ttf-dejavu \
-  xorg-server \
-  xorg-xinit \
-  openbox \
-  xterm
+  mesa \
+  vulkan-icd-loader \
+  vulkan-validation-layers
 
 # Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -30,8 +23,9 @@ source ~/.cargo/env
 git clone https://github.com/Harlox/ZenOS ~/ZenOS
 cd ~/ZenOS
 
-# Compiler
+# Compiler en release
 cargo build --release
 
+echo ""
 echo "=== ZenOS installé ! ==="
 echo "Pour lancer : cd ~/ZenOS && cargo run --release"
