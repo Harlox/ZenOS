@@ -56,10 +56,10 @@ const ROUNDED_SHADER: &str = r#"
 #extension GL_OES_standard_derivatives : enable
 precision mediump float;
 varying vec2 v_coords;
-uniform vec2 size;
 uniform float alpha;
 uniform vec4 u_color;
 uniform float u_radius;
+uniform vec2 u_size;
 
 float sd_rounded_box(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
@@ -67,11 +67,13 @@ float sd_rounded_box(vec2 p, vec2 b, float r) {
 }
 
 void main() {
-    vec2 p = v_coords * size - size * 0.5;
-    float d = sd_rounded_box(p, size * 0.5, u_radius);
+    vec2 p = v_coords * u_size - u_size * 0.5;
+    float d = sd_rounded_box(p, u_size * 0.5, u_radius);
     float aa = fwidth(d);
-    float a = 1.0 - smoothstep(-aa, aa, d);
-    gl_FragColor = vec4(u_color.rgb, u_color.a * a * alpha);
+    float cov = 1.0 - smoothstep(-aa, aa, d);
+    float a = u_color.a * cov * alpha;
+    // smithay expects premultiplied alpha.
+    gl_FragColor = vec4(u_color.rgb * a, a);
 }
 "#;
 
@@ -111,6 +113,7 @@ impl Gpu {
             vec![
                 Uniform::new("u_color", BAR_COLOR),
                 Uniform::new("u_radius", BAR_RADIUS),
+                Uniform::new("u_size", [w as f32, BAR_H as f32]),
             ],
             Kind::Unspecified,
         );
@@ -122,6 +125,7 @@ impl Gpu {
             vec![
                 Uniform::new("u_color", DOCK_COLOR),
                 Uniform::new("u_radius", DOCK_RADIUS),
+                Uniform::new("u_size", [DOCK_W as f32, DOCK_H as f32]),
             ],
             Kind::Unspecified,
         );
@@ -271,6 +275,7 @@ fn open_gpu(
         &[
             UniformName::new("u_color", UniformType::_4f),
             UniformName::new("u_radius", UniformType::_1f),
+            UniformName::new("u_size", UniformType::_2f),
         ],
     )?;
 
