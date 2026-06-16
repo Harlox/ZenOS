@@ -102,6 +102,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // TODO(milestone-7): libinput source -> state.process_input (Esc to quit).
 
+    // --- Safety auto-exit ----------------------------------------------------
+    // We have no input handler yet (milestone 7). To never lock the machine,
+    // ZenOS quits on its own after a timeout, releasing DRM master and restoring
+    // the TTY. Override with ZENOS_TIMEOUT=<seconds>, or 0 to disable.
+    let timeout = std::env::var("ZENOS_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(10);
+    let deadline = (timeout > 0).then(|| std::time::Instant::now() + Duration::from_secs(timeout));
+    if deadline.is_some() {
+        tracing::info!("auto-exit in {timeout}s (set ZENOS_TIMEOUT to change, 0 to disable)");
+    }
+
     // --- Dispatch loop -------------------------------------------------------
     tracing::info!("ZenOS compositor running");
     while state.running {
@@ -109,8 +122,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         // damage redraw comes with the UI port; for now we clear every tick.
         render(&mut state);
         event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
+
+        if let Some(d) = deadline {
+            if std::time::Instant::now() >= d {
+                tracing::info!("auto-exit timeout reached, shutting down");
+                state.running = false;
+            }
+        }
     }
 
+    tracing::info!("releasing GPU + session");
+    state.gpu = None; // drop DrmDevice -> release DRM master -> restore TTY
     Ok(())
 }
 
