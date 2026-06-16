@@ -70,12 +70,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("no GPU found via udev")?;
     tracing::info!("primary GPU: {:?}", primary);
 
-    // Open + init the primary GPU (steps 3-4).
     let dev_path = primary
         .dev_path()
         .ok_or("primary GPU has no device path")?;
-    let gpu = open_gpu(&mut state.session, primary, &dev_path)?;
-    state.gpu = Some(gpu);
 
     // --- Event sources -------------------------------------------------------
     // Session pause/resume (VT switch): drop/regain DRM master.
@@ -91,6 +88,25 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             // TODO(milestone-4): drm.activate() + reset CRTC + redraw.
         }
     })?;
+
+    // Wait for libseat to activate the session before opening the GPU.
+    // LibSeatSession::new returns before the seat is active; the session only
+    // becomes active once its notifier (inserted above) is dispatched and
+    // libseat sends `enable_seat`. Opening the DRM device before that fails
+    // SET_MASTER ("unprivileged mode"). Pump the loop until active, capped.
+    let mut tries = 0;
+    while !state.session.is_active() && tries < 200 {
+        event_loop.dispatch(Some(Duration::from_millis(10)), &mut state)?;
+        tries += 1;
+    }
+    if !state.session.is_active() {
+        return Err("session never became active (no DRM master)".into());
+    }
+    tracing::info!("session active after {tries} dispatch(es)");
+
+    // Open + init the primary GPU (steps 3-4), now that we can become master.
+    let gpu = open_gpu(&mut state.session, primary, &dev_path)?;
+    state.gpu = Some(gpu);
 
     // Hotplug. For milestone 1-4 we already opened the primary GPU above, so
     // just log; full add/remove handling is later.
