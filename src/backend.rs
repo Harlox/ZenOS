@@ -21,7 +21,8 @@ use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
-use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
+use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::Color32F;
 use smithay::backend::session::libseat::LibSeatSession;
@@ -37,6 +38,12 @@ use crate::state::ZenState;
 
 /// Background clear color (matches the old wgpu clear).
 const CLEAR: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
+const BAR_COLOR: [f32; 4] = [0.18, 0.18, 0.18, 1.0];
+const DOCK_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
+const BAR_H: i32 = 30;
+const DOCK_W: i32 = 500;
+const DOCK_H: i32 = 65;
+const DOCK_MARGIN: i32 = 15;
 
 /// The DrmCompositor type for one GPU: GBM allocator + GBM framebuffer exporter,
 /// `()` queue user-data, DrmDeviceFd-backed GBM.
@@ -53,12 +60,35 @@ pub struct Gpu {
     /// Kept alive: DrmCompositor holds a Weak reference to it for mode/scale.
     pub _output: Output,
     pub compositor: ZenCompositor,
+    /// Screen size in px (from the DRM mode).
+    pub size: (i32, i32),
+    /// UI rect buffers (borrowed by render elements each frame).
+    pub bar_buf: SolidColorBuffer,
+    pub dock_buf: SolidColorBuffer,
 }
 
 impl Gpu {
-    /// Render one frame: clear to CLEAR and page-flip.
+    /// Render one frame: top bar + bottom dock over a clear background, page-flip.
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let elements: [SolidColorRenderElement; 0] = [];
+        let (w, h) = self.size;
+        let dock_x = (w - DOCK_W) / 2;
+        let dock_y = h - DOCK_H - DOCK_MARGIN;
+        let elements = [
+            SolidColorRenderElement::from_buffer(
+                &self.bar_buf,
+                (0, 0).into(),
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            ),
+            SolidColorRenderElement::from_buffer(
+                &self.dock_buf,
+                (dock_x, dock_y).into(),
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            ),
+        ];
         self.compositor.render_frame::<_, SolidColorRenderElement>(
             &mut self.renderer,
             &elements,
@@ -257,6 +287,10 @@ fn open_gpu(
         Some(gbm.clone()),
     )?;
 
+    let size = (mode.size().0 as i32, mode.size().1 as i32);
+    let bar_buf = SolidColorBuffer::new((size.0, BAR_H), BAR_COLOR);
+    let dock_buf = SolidColorBuffer::new((DOCK_W, DOCK_H), DOCK_COLOR);
+
     Ok(Gpu {
         node,
         drm,
@@ -265,5 +299,8 @@ fn open_gpu(
         renderer,
         _output: output,
         compositor,
+        size,
+        bar_buf,
+        dock_buf,
     })
 }
