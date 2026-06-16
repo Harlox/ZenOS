@@ -22,15 +22,35 @@ impl Vertex {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
+                // position
                 wgpu::VertexAttribute {
                     offset: 0,
                     shader_location: 0,
                     format: wgpu::VertexFormat::Float32x2,
                 },
+                // color
                 wgpu::VertexAttribute {
-                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    offset: 8,
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x4,
+                },
+                // uv
+                wgpu::VertexAttribute {
+                    offset: 24,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                // size
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                // radius
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32,
                 },
             ],
         }
@@ -113,23 +133,8 @@ impl Renderer {
             cache: None,
         });
 
-        // Bar
-        let bar_verts = bar::vertices(sw, sh);
-        let bar_vertices = bar_verts.len() as u32;
-        let bar_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("bar"),
-            contents: bytemuck::cast_slice(&bar_verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        // Dock
-        let dock_verts = dock::vertices(sw, sh);
-        let dock_vertices = dock_verts.len() as u32;
-        let dock_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("dock"),
-            contents: bytemuck::cast_slice(&dock_verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let (bar_buffer, bar_vertices, dock_buffer, dock_vertices) =
+            build_ui_buffers(&device, sw, sh);
 
         Self {
             window, surface, device, queue, config, pipeline,
@@ -138,9 +143,31 @@ impl Renderer {
         }
     }
 
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+
+        // UI rects are sized in NDC from the surface dimensions; rebuild them.
+        let (bar_buffer, bar_vertices, dock_buffer, dock_vertices) =
+            build_ui_buffers(&self.device, width as f32, height as f32);
+        self.bar_buffer = bar_buffer;
+        self.bar_vertices = bar_vertices;
+        self.dock_buffer = dock_buffer;
+        self.dock_vertices = dock_vertices;
+    }
+
     pub fn render(&mut self) {
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
+            // Surface stale (resize, GPU reset): reconfigure and skip this frame.
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
             Err(_) => return,
         };
         let view = frame.texture.create_view(&Default::default());
@@ -180,4 +207,28 @@ impl Renderer {
     pub fn window(&self) -> &Arc<Window> {
         &self.window
     }
+}
+
+fn build_ui_buffers(
+    device: &wgpu::Device,
+    sw: f32,
+    sh: f32,
+) -> (wgpu::Buffer, u32, wgpu::Buffer, u32) {
+    let bar_verts = bar::vertices(sw, sh);
+    let bar_vertices = bar_verts.len() as u32;
+    let bar_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("bar"),
+        contents: bytemuck::cast_slice(&bar_verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    let dock_verts = dock::vertices(sw, sh);
+    let dock_vertices = dock_verts.len() as u32;
+    let dock_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("dock"),
+        contents: bytemuck::cast_slice(&dock_verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    (bar_buffer, bar_vertices, dock_buffer, dock_vertices)
 }

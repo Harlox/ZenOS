@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
@@ -20,7 +20,9 @@ impl ApplicationHandler for App {
                 .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0))
         ).unwrap());
 
-        self.renderer = Some(pollster::block_on(Renderer::new(window)));
+        let renderer = pollster::block_on(Renderer::new(window));
+        renderer.window().request_redraw(); // initial paint
+        self.renderer = Some(renderer);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
@@ -33,10 +35,16 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::Resized(size) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.resize(size.width, size.height);
+                    renderer.window().request_redraw();
+                }
+            }
             WindowEvent::RedrawRequested => {
+                // Event-driven: render only when damaged, no continuous redraw loop.
                 if let Some(renderer) = &mut self.renderer {
                     renderer.render();
-                    renderer.window().request_redraw();
                 }
             }
             _ => {}
@@ -46,5 +54,6 @@ impl ApplicationHandler for App {
 
 pub fn run() {
     let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(ControlFlow::Wait); // sleep when idle, wake on events
     event_loop.run_app(&mut App::default()).unwrap();
 }
