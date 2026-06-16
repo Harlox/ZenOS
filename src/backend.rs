@@ -49,8 +49,8 @@ const BAR_H: i32 = 30;
 const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
 const DOCK_MARGIN: i32 = 15;
-/// evdev KEY_ESC.
-const KEY_ESC: u32 = 1;
+/// xkb keycode for Esc (evdev KEY_ESC 1 + 8). smithay's Keycode is xkb-space.
+const KEY_ESC: u32 = 9;
 const BAR_RADIUS: f32 = 0.0;
 const DOCK_RADIUS: f32 = 16.0;
 
@@ -228,13 +228,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let libinput_backend = LibinputInputBackend::new(libinput);
     handle.insert_source(libinput_backend, move |event, _, data| {
         if let InputEvent::Keyboard { event } = event {
-            if event.state() == KeyState::Pressed {
-                let code = event.key_code();
-                tracing::info!("key pressed: {code:?}");
-                if code == KEY_ESC.into() {
-                    tracing::info!("Esc pressed, exiting");
-                    data.running = false;
-                }
+            if event.state() == KeyState::Pressed && event.key_code() == KEY_ESC.into() {
+                tracing::info!("Esc pressed, exiting");
+                data.running = false;
             }
         }
     })?;
