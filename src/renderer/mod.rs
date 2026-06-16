@@ -9,7 +9,12 @@ use crate::ui::{bar, dock};
 pub struct Vertex {
     pub position: [f32; 2],
     pub color: [f32; 4],
+    pub uv: [f32; 2],
+    pub size: [f32; 2],
+    pub radius: f32,
+    pub _pad: f32,
 }
+
 
 impl Vertex {
     pub fn desc() -> wgpu::VertexBufferLayout<'static> {
