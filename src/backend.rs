@@ -228,7 +228,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let libinput_backend = LibinputInputBackend::new(libinput);
     handle.insert_source(libinput_backend, move |event, _, data| {
         if let InputEvent::Keyboard { event } = event {
-            if event.state() == KeyState::Pressed && event.key_code() == KEY_ESC {
+            if event.state() == KeyState::Pressed && event.key_code() == KEY_ESC.into() {
                 tracing::info!("Esc pressed, exiting");
                 data.running = false;
             }
