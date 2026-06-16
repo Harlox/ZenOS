@@ -21,6 +21,9 @@ use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
+use smithay::backend::input::{InputEvent, KeyState, KeyboardKeyEvent};
+use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::reexports::input::Libinput;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::backend::renderer::gles::{
@@ -46,6 +49,8 @@ const BAR_H: i32 = 30;
 const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
 const DOCK_MARGIN: i32 = 15;
+/// evdev KEY_ESC.
+const KEY_ESC: u32 = 1;
 const BAR_RADIUS: f32 = 0.0;
 const DOCK_RADIUS: f32 = 16.0;
 
@@ -214,7 +219,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         UdevEvent::Removed { device_id } => tracing::debug!("udev remove {device_id}"),
     })?;
 
-    // TODO(milestone-7): libinput source -> Esc to quit.
+    // Input: libinput on the session seat. Esc quits cleanly.
+    let mut libinput =
+        Libinput::new_with_udev(LibinputSessionInterface::from(state.session.clone()));
+    libinput
+        .udev_assign_seat(&seat_name)
+        .map_err(|_| "libinput udev_assign_seat failed")?;
+    let libinput_backend = LibinputInputBackend::new(libinput);
+    handle.insert_source(libinput_backend, move |event, _, data| {
+        if let InputEvent::Keyboard { event } = event {
+            if event.state() == KeyState::Pressed && event.key_code() == KEY_ESC {
+                tracing::info!("Esc pressed, exiting");
+                data.running = false;
+            }
+        }
+    })?;
 
     // --- Safety auto-exit ----------------------------------------------------
     let timeout = std::env::var("ZENOS_TIMEOUT")
