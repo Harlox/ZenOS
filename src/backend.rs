@@ -21,9 +21,11 @@ use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
-use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
 use smithay::backend::renderer::element::Kind;
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::element::PixelShaderElement;
+use smithay::backend::renderer::gles::{
+    GlesPixelProgram, GlesRenderer, Uniform, UniformName, UniformType,
+};
 use smithay::backend::renderer::Color32F;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -32,7 +34,7 @@ use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::drm::control::{connector, Device as _};
 use smithay::reexports::rustix::fs::OFlags;
-use smithay::utils::{DeviceFd, Physical, Point};
+use smithay::utils::{DeviceFd, Rectangle};
 
 use crate::state::ZenState;
 
@@ -44,6 +46,34 @@ const BAR_H: i32 = 30;
 const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
 const DOCK_MARGIN: i32 = 15;
+const BAR_RADIUS: f32 = 0.0;
+const DOCK_RADIUS: f32 = 16.0;
+
+/// Rounded-rectangle pixel shader (GLSL ES 100; no #version per smithay).
+/// Built-in uniforms: `size` (px), `alpha`. Custom: `u_color`, `u_radius`.
+/// `v_coords` is normalized [0,1] across the element.
+const ROUNDED_SHADER: &str = r#"
+#extension GL_OES_standard_derivatives : enable
+precision mediump float;
+varying vec2 v_coords;
+uniform vec2 size;
+uniform float alpha;
+uniform vec4 u_color;
+uniform float u_radius;
+
+float sd_rounded_box(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+}
+
+void main() {
+    vec2 p = v_coords * size - size * 0.5;
+    float d = sd_rounded_box(p, size * 0.5, u_radius);
+    float aa = fwidth(d);
+    float a = 1.0 - smoothstep(-aa, aa, d);
+    gl_FragColor = vec4(u_color.rgb, u_color.a * a * alpha);
+}
+"#;
 
 /// The DrmCompositor type for one GPU: GBM allocator + GBM framebuffer exporter,
 /// `()` queue user-data, DrmDeviceFd-backed GBM.
@@ -62,34 +92,41 @@ pub struct Gpu {
     pub compositor: ZenCompositor,
     /// Screen size in px (from the DRM mode).
     pub size: (i32, i32),
-    /// UI rect buffers (borrowed by render elements each frame).
-    pub bar_buf: SolidColorBuffer,
-    pub dock_buf: SolidColorBuffer,
+    /// Compiled rounded-rect pixel shader, reused for bar + dock.
+    pub rounded: GlesPixelProgram,
 }
 
 impl Gpu {
-    /// Render one frame: top bar + bottom dock over a clear background, page-flip.
+    /// Render one frame: top bar + bottom dock (rounded corners) over a clear
+    /// background, then page-flip.
     fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (w, h) = self.size;
         let dock_x = (w - DOCK_W) / 2;
         let dock_y = h - DOCK_H - DOCK_MARGIN;
-        let elements = [
-            SolidColorRenderElement::from_buffer(
-                &self.bar_buf,
-                Point::<i32, Physical>::from((0, 0)),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ),
-            SolidColorRenderElement::from_buffer(
-                &self.dock_buf,
-                Point::<i32, Physical>::from((dock_x, dock_y)),
-                1.0,
-                1.0,
-                Kind::Unspecified,
-            ),
-        ];
-        self.compositor.render_frame::<_, SolidColorRenderElement>(
+        let bar = PixelShaderElement::new(
+            self.rounded.clone(),
+            Rectangle::from_loc_and_size((0, 0), (w, BAR_H)),
+            None,
+            1.0,
+            vec![
+                Uniform::new("u_color", BAR_COLOR),
+                Uniform::new("u_radius", BAR_RADIUS),
+            ],
+            Kind::Unspecified,
+        );
+        let dock = PixelShaderElement::new(
+            self.rounded.clone(),
+            Rectangle::from_loc_and_size((dock_x, dock_y), (DOCK_W, DOCK_H)),
+            None,
+            1.0,
+            vec![
+                Uniform::new("u_color", DOCK_COLOR),
+                Uniform::new("u_radius", DOCK_RADIUS),
+            ],
+            Kind::Unspecified,
+        );
+        let elements = [bar, dock];
+        self.compositor.render_frame::<_, PixelShaderElement>(
             &mut self.renderer,
             &elements,
             Color32F::from(CLEAR),
@@ -226,7 +263,16 @@ fn open_gpu(
 
     let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
     let egl_context = EGLContext::new(&egl_display)?;
-    let renderer = unsafe { GlesRenderer::new(egl_context)? };
+    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
+
+    // Rounded-rect shader, reused by the bar and dock.
+    let rounded = renderer.compile_custom_pixel_shader(
+        ROUNDED_SHADER,
+        &[
+            UniformName::new("u_color", UniformType::_4f),
+            UniformName::new("u_radius", UniformType::_1f),
+        ],
+    )?;
 
     // --- pick a connected connector + its preferred mode --------------------
     let res = drm.resource_handles()?;
@@ -288,8 +334,6 @@ fn open_gpu(
     )?;
 
     let size = (mode.size().0 as i32, mode.size().1 as i32);
-    let bar_buf = SolidColorBuffer::new((size.0, BAR_H), BAR_COLOR);
-    let dock_buf = SolidColorBuffer::new((DOCK_W, DOCK_H), DOCK_COLOR);
 
     Ok(Gpu {
         node,
@@ -300,7 +344,6 @@ fn open_gpu(
         _output: output,
         compositor,
         size,
-        bar_buf,
-        dock_buf,
+        rounded,
     })
 }
