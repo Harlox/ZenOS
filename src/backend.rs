@@ -250,7 +250,7 @@ fn open_gpu(
         surface,
         None,
         allocator.clone(),
-        GbmFramebufferExporter::new(gbm.clone()),
+        GbmFramebufferExporter::new(gbm.clone(), node),
         [Fourcc::Argb8888, Fourcc::Xrgb8888],
         render_formats,
         (64u32, 64u32).into(),
