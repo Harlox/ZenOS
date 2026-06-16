@@ -186,7 +186,7 @@ fn open_gpu(
     let fd = session.open(path, OFlags::RDWR | OFlags::CLOEXEC)?;
     let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
-    let (drm, _drm_notifier) = DrmDevice::new(drm_fd.clone(), true)?;
+    let (mut drm, _drm_notifier) = DrmDevice::new(drm_fd.clone(), true)?;
     let gbm = GbmDevice::new(drm_fd)?;
 
     let allocator = GbmAllocator::new(
@@ -196,7 +196,7 @@ fn open_gpu(
 
     let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
     let egl_context = EGLContext::new(&egl_display)?;
-    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
+    let renderer = unsafe { GlesRenderer::new(egl_context)? };
 
     // --- pick a connected connector + its preferred mode --------------------
     let res = drm.resource_handles()?;
