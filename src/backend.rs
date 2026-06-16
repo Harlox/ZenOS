@@ -37,7 +37,13 @@ use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::drm::control::{connector, Device as _};
 use smithay::reexports::rustix::fs::OFlags;
+use smithay::reexports::wayland_server::Display;
 use smithay::utils::{DeviceFd, Rectangle};
+use smithay::wayland::socket::ListeningSocketSource;
+
+use std::sync::Arc;
+
+use crate::state::ClientState;
 
 use crate::state::ZenState;
 
@@ -94,8 +100,8 @@ pub struct Gpu {
     pub gbm: GbmDevice<DrmDeviceFd>,
     pub allocator: GbmAllocator<DrmDeviceFd>,
     pub renderer: GlesRenderer,
-    /// Kept alive: DrmCompositor holds a Weak reference to it for mode/scale.
-    pub _output: Output,
+    /// Logical output: drives the DrmCompositor mode and is mapped into the Space.
+    pub output: Output,
     pub compositor: ZenCompositor,
     /// Screen size in px (from the DRM mode).
     pub size: (i32, i32),
@@ -155,7 +161,26 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<ZenState> = EventLoop::try_new()?;
     let handle = event_loop.handle();
 
-    let mut state = ZenState::new(session, seat_name.clone());
+    // Wayland display (kept local; dispatched each loop tick so existing calloop
+    // sources keep their &mut ZenState signature, no CalloopData wrapper needed).
+    let mut display: Display<ZenState> = Display::new()?;
+    let dh = display.handle();
+
+    let mut state = ZenState::new(dh, event_loop.get_signal(), session, seat_name.clone());
+
+    // Wayland client socket. Clients connecting here get a ClientState.
+    let socket = ListeningSocketSource::new_auto()?;
+    let socket_name = socket.socket_name().to_string_lossy().into_owned();
+    handle.insert_source(socket, move |stream, _, data: &mut ZenState| {
+        if let Err(e) = data
+            .display_handle
+            .insert_client(stream, Arc::new(ClientState::default()))
+        {
+            tracing::warn!("failed to accept client: {e}");
+        }
+    })?;
+    std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    tracing::info!("WAYLAND_DISPLAY={socket_name}");
 
     // --- Step 2: udev (GPU discovery) ---------------------------------------
     let udev_backend = UdevBackend::new(&seat_name)?;
@@ -211,6 +236,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("first frame submitted (gray clear)");
     }
+    // Map the output into the Space so clients can be laid out on it.
+    state.space.map_output(&gpu.output, (0, 0));
     state.gpu = Some(gpu);
 
     handle.insert_source(udev_backend, move |event, _, _data| match event {
@@ -252,6 +279,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("ZenOS compositor running");
     while state.running {
         event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
+
+        // Service Wayland clients, then flush replies.
+        display.dispatch_clients(&mut state)?;
+        display.flush_clients()?;
 
         if let Some(d) = deadline {
             if std::time::Instant::now() >= d {
@@ -365,7 +396,7 @@ fn open_gpu(
         gbm,
         allocator,
         renderer,
-        _output: output,
+        output,
         compositor,
         size,
         rounded,

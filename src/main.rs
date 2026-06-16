@@ -4,6 +4,7 @@
 // for the geometry port (milestone 5) but is NOT declared here, so it is not
 // compiled on this branch.
 mod backend;
+mod handlers;
 mod state;
 
 fn main() {

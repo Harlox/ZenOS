@@ -1,30 +1,90 @@
+use std::time::Instant;
+
+use smithay::desktop::{PopupManager, Space, Window};
+use smithay::input::{Seat, SeatState};
+use smithay::reexports::calloop::LoopSignal;
+use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
+use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::wayland::compositor::{CompositorClientState, CompositorState};
+use smithay::wayland::output::OutputManagerState;
+use smithay::wayland::selection::data_device::DataDeviceState;
+use smithay::wayland::shell::xdg::XdgShellState;
+use smithay::wayland::shm::ShmState;
+
 use smithay::backend::session::libseat::LibSeatSession;
 
 use crate::backend::Gpu;
 
-/// Shared compositor state, passed as the `&mut data` argument to every calloop
-/// event source callback.
+/// Whole-compositor state: DRM backend + Wayland frontend. Passed as `&mut data`
+/// to every calloop event source.
 pub struct ZenState {
-    /// Set to false to break the dispatch loop and exit.
     pub running: bool,
-    /// Seat name from the session (usually "seat0").
-    pub seat_name: String,
-    /// libseat session: grants GPU + input access from a TTY without root.
+    pub start_time: Instant,
+
+    // --- backend ---
     pub session: LibSeatSession,
-    /// The active GPU (DRM device + renderer + scanout). None until the udev
-    /// backend reports the primary GPU via `UdevEvent::Added`.
-    ///
-    /// Milestone 1-4 assumes a single GPU; multi-GPU / hotplug come later.
     pub gpu: Option<Gpu>,
+
+    // --- wayland frontend ---
+    pub display_handle: DisplayHandle,
+    pub loop_signal: LoopSignal,
+    pub space: Space<Window>,
+    pub popups: PopupManager,
+
+    pub compositor_state: CompositorState,
+    pub xdg_shell_state: XdgShellState,
+    pub shm_state: ShmState,
+    pub output_manager_state: OutputManagerState,
+    pub seat_state: SeatState<ZenState>,
+    pub data_device_state: DataDeviceState,
+    pub seat: Seat<ZenState>,
 }
 
 impl ZenState {
-    pub fn new(session: LibSeatSession, seat_name: String) -> Self {
+    pub fn new(
+        dh: DisplayHandle,
+        loop_signal: LoopSignal,
+        session: LibSeatSession,
+        seat_name: String,
+    ) -> Self {
+        let compositor_state = CompositorState::new::<Self>(&dh);
+        let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let shm_state = ShmState::new::<Self>(&dh, vec![]);
+        let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
+        let data_device_state = DataDeviceState::new::<Self>(&dh);
+
+        let mut seat_state = SeatState::new();
+        let mut seat = seat_state.new_wl_seat(&dh, seat_name);
+        seat.add_keyboard(Default::default(), 200, 25).unwrap();
+        seat.add_pointer();
+
         Self {
             running: true,
-            seat_name,
+            start_time: Instant::now(),
             session,
             gpu: None,
+            display_handle: dh,
+            loop_signal,
+            space: Space::default(),
+            popups: PopupManager::default(),
+            compositor_state,
+            xdg_shell_state,
+            shm_state,
+            output_manager_state,
+            seat_state,
+            data_device_state,
+            seat,
         }
     }
+}
+
+/// Per-client data: holds the client's compositor state.
+#[derive(Default)]
+pub struct ClientState {
+    pub compositor_state: CompositorClientState,
+}
+
+impl ClientData for ClientState {
+    fn initialized(&self, _client_id: ClientId) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
 }
