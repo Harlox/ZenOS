@@ -1,45 +1,72 @@
 //! DRM/KMS backend: ZenOS owns the screen directly, no weston/X11.
 //!
-//! Milestones covered by this scaffold:
+//! Milestones covered:
 //!   1. libseat session (GPU/input access from a TTY without root)
 //!   2. udev: discover the primary GPU
 //!   3. open the DRM device + GBM allocator
-//!   4. EGL + GlesRenderer, set a CRTC mode, clear the screen each frame
+//!   4. EGL + GlesRenderer, pick connector/CRTC/mode, clear the screen (gray)
 //!
 //! NOT yet: input (libinput), Wayland clients, hotplug, multi-GPU, the ZenOS
 //! UI (bar/dock). Those are milestones 5-8.
 //!
-//! smithay 0.7 API. This file is Linux-only and will need compiler iteration on
-//! the Arch target — the DRM output/compositor construction (marked TODO) is the
-//! most version-sensitive part.
+//! User-mode DRM master is currently not granted by logind in this setup; run
+//! as root for now (see notes). smithay 0.7 API — Linux-only, iterate on the
+//! Arch target.
 
 use std::time::Duration;
 
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
+use smithay::backend::allocator::Fourcc;
+use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
+use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::Color32F;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
-use smithay::backend::udev::{primary_gpu, all_gpus, UdevBackend, UdevEvent};
+use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
+use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::EventLoop;
+use smithay::reexports::drm::control::{connector, Device as _};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::DeviceFd;
 
 use crate::state::ZenState;
 
-/// One GPU: the DRM device, GBM allocator, GLES renderer and scanout surface.
+/// Background clear color (matches the old wgpu clear).
+const CLEAR: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
+
+/// The DrmCompositor type for one GPU: GBM allocator + GBM framebuffer exporter,
+/// `()` queue user-data, DrmDeviceFd-backed GBM.
+type ZenCompositor =
+    DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmDevice<DrmDeviceFd>, (), DrmDeviceFd>;
+
+/// One GPU: the DRM device, GBM allocator, GLES renderer and scanout compositor.
 pub struct Gpu {
     pub node: DrmNode,
     pub drm: DrmDevice,
     pub gbm: GbmDevice<DrmDeviceFd>,
     pub allocator: GbmAllocator<DrmDeviceFd>,
     pub renderer: GlesRenderer,
-    // TODO(milestone-4): scanout surface. In smithay 0.7 use either
-    // `DrmCompositor` (handles allocation + page flip) or a raw `DrmSurface`.
-    // Its generic params depend on the render element type — fill against the
-    // compiler. Storing as Option until wired.
-    // pub compositor: DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmDevice<DrmDeviceFd>, (), DrmDeviceFd>,
+    /// Kept alive: DrmCompositor holds a Weak reference to it for mode/scale.
+    pub _output: Output,
+    pub compositor: ZenCompositor,
+}
+
+impl Gpu {
+    /// Render one frame: clear to CLEAR and page-flip.
+    fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let elements: [SolidColorRenderElement; 0] = [];
+        self.compositor.render_frame::<_, SolidColorRenderElement>(
+            &mut self.renderer,
+            &elements,
+            Color32F::from(CLEAR),
+            FrameFlags::DEFAULT,
+        )?;
+        self.compositor.queue_frame(())?;
+        Ok(())
+    }
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,7 +83,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --- Step 2: udev (GPU discovery) ---------------------------------------
     let udev_backend = UdevBackend::new(&seat_name)?;
 
-    // Resolve the primary GPU now so we can open it before entering the loop.
     let primary = primary_gpu(&seat_name)
         .ok()
         .flatten()
@@ -75,7 +101,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("primary GPU has no device path")?;
 
     // --- Event sources -------------------------------------------------------
-    // Session pause/resume (VT switch): drop/regain DRM master.
     handle.insert_source(session_notifier, move |event, _, data| match event {
         SessionEvent::PauseSession => {
             tracing::info!("session paused");
@@ -85,15 +110,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         SessionEvent::ActivateSession => {
             tracing::info!("session resumed");
-            // TODO(milestone-4): drm.activate() + reset CRTC + redraw.
+            // TODO(milestone-7): drm.activate() + reset CRTC + redraw.
         }
     })?;
 
-    // Wait for libseat to activate the session before opening the GPU.
-    // LibSeatSession::new returns before the seat is active; the session only
-    // becomes active once its notifier (inserted above) is dispatched and
-    // libseat sends `enable_seat`. Opening the DRM device before that fails
-    // SET_MASTER ("unprivileged mode"). Pump the loop until active, capped.
+    // Pump until the session is active before opening the GPU (SET_MASTER).
     let mut tries = 0;
     while !state.session.is_active() && tries < 200 {
         event_loop.dispatch(Some(Duration::from_millis(10)), &mut state)?;
@@ -104,39 +125,41 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("session active after {tries} dispatch(es)");
 
-    // Open + init the primary GPU (steps 3-4), now that we can become master.
-    let gpu = open_gpu(&mut state.session, primary, &dev_path)?;
+    // Open + init the primary GPU (steps 3-4).
+    let mut gpu = open_gpu(&mut state.session, primary, &dev_path)?;
+
+    // First frame: clear to gray.
+    if let Err(e) = gpu.render() {
+        tracing::error!("first render failed: {e}");
+    } else {
+        tracing::info!("first frame submitted (gray clear)");
+    }
     state.gpu = Some(gpu);
 
-    // Hotplug. For milestone 1-4 we already opened the primary GPU above, so
-    // just log; full add/remove handling is later.
     handle.insert_source(udev_backend, move |event, _, _data| match event {
         UdevEvent::Added { device_id, .. } => tracing::debug!("udev add {device_id}"),
         UdevEvent::Changed { device_id } => tracing::debug!("udev change {device_id}"),
         UdevEvent::Removed { device_id } => tracing::debug!("udev remove {device_id}"),
     })?;
 
-    // TODO(milestone-7): libinput source -> state.process_input (Esc to quit).
+    // TODO(milestone-7): libinput source -> Esc to quit.
 
     // --- Safety auto-exit ----------------------------------------------------
-    // We have no input handler yet (milestone 7). To never lock the machine,
-    // ZenOS quits on its own after a timeout, releasing DRM master and restoring
-    // the TTY. Override with ZENOS_TIMEOUT=<seconds>, or 0 to disable.
     let timeout = std::env::var("ZENOS_TIMEOUT")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(10);
-    let deadline = (timeout > 0).then(|| std::time::Instant::now() + Duration::from_secs(timeout));
+    let deadline =
+        (timeout > 0).then(|| std::time::Instant::now() + Duration::from_secs(timeout));
     if deadline.is_some() {
         tracing::info!("auto-exit in {timeout}s (set ZENOS_TIMEOUT to change, 0 to disable)");
     }
 
     // --- Dispatch loop -------------------------------------------------------
+    // Single static frame for now; just service events (vblank, session) and
+    // honor the auto-exit deadline. Continuous redraw comes with the UI port.
     tracing::info!("ZenOS compositor running");
     while state.running {
-        // Render a frame, then wait up to ~16ms (≈60Hz) for events. Event-driven
-        // damage redraw comes with the UI port; for now we clear every tick.
-        render(&mut state);
         event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
 
         if let Some(d) = deadline {
@@ -152,19 +175,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Steps 3-4: open the DRM device, create the GBM allocator, EGL display and
-/// GLES renderer for one GPU.
+/// Steps 3-4: open the DRM device, GBM allocator, EGL/GLES renderer, then pick a
+/// connected connector + CRTC + mode and build the scanout compositor.
 fn open_gpu(
     session: &mut LibSeatSession,
     node: DrmNode,
     path: &std::path::Path,
 ) -> Result<Gpu, Box<dyn std::error::Error>> {
-    // Open via the session so we get a DRM-master-capable fd without root.
     let fd = session.open(path, OFlags::RDWR | OFlags::CLOEXEC)?;
     let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
-    // `true` = disable atomic? In 0.7 the second arg is `disable_connectors`.
-    // Verify against the compiler.
     let (drm, _drm_notifier) = DrmDevice::new(drm_fd.clone(), true)?;
     let gbm = GbmDevice::new(drm_fd)?;
 
@@ -173,17 +193,68 @@ fn open_gpu(
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
 
-    // EGL display from the GBM device, then a GLES renderer.
     let egl_display = unsafe { EGLDisplay::new(gbm.clone())? };
     let egl_context = EGLContext::new(&egl_display)?;
-    let renderer = unsafe { GlesRenderer::new(egl_context)? };
+    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
 
-    // TODO(milestone-4): pick connector + CRTC + preferred mode, build the
-    // scanout surface (DrmCompositor / DrmSurface) and store it on Gpu.
-    //   - enumerate `drm.resource_handles()` connectors, find one Connected
-    //   - pick `connector.modes()` preferred (or first)
-    //   - find a free crtc for that connector's encoder
-    //   - DrmCompositor::new(&output, surface, planes, allocator, gbm, ...)
+    // --- pick a connected connector + its preferred mode --------------------
+    let res = drm.resource_handles()?;
+    let conn = res
+        .connectors()
+        .iter()
+        .filter_map(|h| drm.get_connector(*h, false).ok())
+        .find(|c| c.state() == connector::State::Connected)
+        .ok_or("no connected connector")?;
+    let mode = *conn.modes().first().ok_or("connector has no modes")?;
+    tracing::info!(
+        "connector {:?}, mode {}x{}",
+        conn.interface(),
+        mode.size().0,
+        mode.size().1
+    );
+
+    // --- find a CRTC drivable by this connector's encoders ------------------
+    let crtc = conn
+        .encoders()
+        .iter()
+        .filter_map(|e| drm.get_encoder(*e).ok())
+        .flat_map(|enc| res.filter_crtcs(enc.possible_crtcs()))
+        .next()
+        .ok_or("no CRTC for connector")?;
+
+    // --- scanout surface ----------------------------------------------------
+    let surface = drm.create_surface(crtc, mode, &[conn.handle()])?;
+
+    // --- logical output (drives the compositor's mode/scale) ----------------
+    let output = Output::new(
+        "ZenOS-1".to_string(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "ZenOS".into(),
+            model: "Virtual".into(),
+        },
+    );
+    let wl_mode = OutputMode {
+        size: (mode.size().0 as i32, mode.size().1 as i32).into(),
+        refresh: mode.vrefresh() as i32 * 1000,
+    };
+    output.change_current_state(Some(wl_mode), None, None, None);
+    output.set_preferred(wl_mode);
+
+    // --- compositor ---------------------------------------------------------
+    let render_formats = renderer.egl_context().dmabuf_render_formats().clone();
+    let compositor = DrmCompositor::new(
+        &output,
+        surface,
+        None,
+        allocator.clone(),
+        gbm.clone(),
+        [Fourcc::Argb8888, Fourcc::Xrgb8888],
+        render_formats,
+        (64u32, 64u32).into(),
+        Some(gbm.clone()),
+    )?;
 
     Ok(Gpu {
         node,
@@ -191,14 +262,7 @@ fn open_gpu(
         gbm,
         allocator,
         renderer,
+        _output: output,
+        compositor,
     })
-}
-
-/// Step 4: clear the screen. Placeholder until the scanout surface exists.
-fn render(_state: &mut ZenState) {
-    // TODO(milestone-4): with the DrmCompositor in place:
-    //   let elements: &[ZenRenderElement] = &[];
-    //   compositor.render_frame(&mut renderer, elements, CLEAR_COLOR)?;
-    //   compositor.queue_frame(())?;   // page flip
-    // CLEAR_COLOR = [0.08, 0.08, 0.08, 1.0] (matches the old wgpu clear).
 }
