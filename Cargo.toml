@@ -4,7 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-winit = "0.30"
-wgpu = "22"
-pollster = "0.3"
-bytemuck = { version = "1", features = ["derive"] }
+# Wayland compositor on DRM/KMS. Linux-only — this branch does not build on
+# Windows/macOS. Build and test on the Arch target.
+smithay = { version = "0.7", default-features = false, features = [
+    "backend_drm",
+    "backend_gbm",
+    "backend_egl",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_udev",
+    "renderer_gl",
+    "wayland_frontend",
+] }
+rustix = { version = "0.38", features = ["fs"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Old wgpu/winit shell kept on disk (src/app.rs, src/renderer/, src/ui/) for the
+# geometry port in milestone 5. Not compiled: main.rs no longer declares those
+# modules. Re-add wgpu/winit deps only if reviving the windowed build.
