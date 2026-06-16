@@ -1,0 +1,7 @@
+#!/bin/sh
+# ZenOS session launcher, run by greetd as the logged-in user.
+# greetd sets up an active seat session on the VT, so logind grants DRM master
+# to this user — no root needed.
+export RUST_LOG=${RUST_LOG:-info}
+export ZENOS_TIMEOUT=0          # this IS the session; no auto-exit
+exec /usr/local/bin/zenos > /tmp/zenos.log 2>&1

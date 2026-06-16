@@ -1,0 +1,8 @@
+# /etc/greetd/config.toml — boot straight into ZenOS (kiosk autologin).
+# Replace `pc` with your username if different.
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/local/bin/zenos-session"
+user = "pc"
