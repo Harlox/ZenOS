@@ -18,6 +18,7 @@ use std::time::Duration;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
+use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
@@ -40,7 +41,7 @@ const CLEAR: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
 /// The DrmCompositor type for one GPU: GBM allocator + GBM framebuffer exporter,
 /// `()` queue user-data, DrmDeviceFd-backed GBM.
 type ZenCompositor =
-    DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmDevice<DrmDeviceFd>, (), DrmDeviceFd>;
+    DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
 
 /// One GPU: the DRM device, GBM allocator, GLES renderer and scanout compositor.
 pub struct Gpu {
@@ -249,7 +250,7 @@ fn open_gpu(
         surface,
         None,
         allocator.clone(),
-        gbm.clone(),
+        GbmFramebufferExporter::new(gbm.clone()),
         [Fourcc::Argb8888, Fourcc::Xrgb8888],
         render_formats,
         (64u32, 64u32).into(),
