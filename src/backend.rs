@@ -99,7 +99,8 @@ type ZenCompositor =
 
 render_elements! {
     /// One frame's elements: client window surfaces + ZenOS UI (bar/dock).
-    pub ZenElement;
+    /// Renderer-specific (GlesRenderer) since PixelShaderElement is GLES-only.
+    pub ZenElement<=GlesRenderer>;
     Window = WaylandSurfaceRenderElement<GlesRenderer>,
     Ui = PixelShaderElement,
 }
