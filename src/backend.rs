@@ -819,21 +819,24 @@ impl Gpu {
             return Ok(false);
         }
 
-        // F2 screenshot: re-render the full frame into a temp texture and save
-        // it (clean, unlike a phone photo). Rare path; ignore on error.
+        // F2 screenshot: export the already-rendered scene texture. This avoids
+        // sampling scene_tex while re-rendering into another offscreen target,
+        // which can produce empty readbacks on some GLES drivers.
         if shot {
             let mut capture = || -> Result<(), Box<dyn std::error::Error>> {
-                let mut shot_tex: GlesTexture =
-                    renderer.create_buffer(Fourcc::Abgr8888, Size::from((w, h)))?;
-                let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
-                let mut fb = renderer.bind(&mut shot_tex)?;
-                tracker.render_output(renderer, &mut fb, 0, &overlay, Color32F::from(CLEAR))?;
                 let region = Rectangle::from_loc_and_size((0, 0), (w, h));
-                let mapping = renderer.copy_framebuffer(&fb, region, Fourcc::Abgr8888)?;
+                let mapping = renderer.copy_texture(&*scene_tex, region, Fourcc::Abgr8888)?;
                 let bytes = renderer.map_texture(&mapping)?;
+                let stride = w as usize * 4;
+                let mut flipped = vec![0u8; bytes.len()];
+                for y in 0..h as usize {
+                    let src = y * stride;
+                    let dst = (h as usize - 1 - y) * stride;
+                    flipped[dst..dst + stride].copy_from_slice(&bytes[src..src + stride]);
+                }
                 image::save_buffer(
                     "/tmp/zenos-shot.png",
-                    bytes,
+                    &flipped,
                     w as u32,
                     h as u32,
                     image::ExtendedColorType::Rgba8,
