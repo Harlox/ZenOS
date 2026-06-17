@@ -113,8 +113,8 @@ float sd_rounded_box(vec2 p, vec2 b, float r) {
 void main() {
     vec2 p = v_coords * u_size - u_size * 0.5;
     float d = sd_rounded_box(p, u_size * 0.5, u_radius);
-    float aa = fwidth(d);
-    float cov = 1.0 - smoothstep(-aa, aa, d);
+    // Analytic 1px anti-alias (crisper than smoothstep over 2*fwidth).
+    float cov = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
     float a = u_color.a * cov * alpha;
     // smithay expects premultiplied alpha.
     gl_FragColor = vec4(u_color.rgb * a, a);
@@ -145,8 +145,7 @@ void main() {
     float r = p.y < 0.0 ? u_radius_top : u_radius_bottom;
     vec2 q = abs(p) - b + r;
     float d = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
-    float aa = fwidth(d);
-    float cov = 1.0 - smoothstep(-aa, aa, d);
+    float cov = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
     float a = u_color.a * cov * alpha;
     gl_FragColor = vec4(u_color.rgb * a, a);
 }
