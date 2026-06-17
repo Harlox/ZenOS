@@ -1416,12 +1416,20 @@ fn dock_icon_pos(w: i32, h: i32, i: usize, n: usize) -> (i32, i32) {
 /// Texture resolution for dock icons (> ICON_SIZE so magnified icons stay crisp).
 const ICON_TEX: i32 = 128;
 
-/// Decode an embedded icon PNG and upload it as a square texture.
+/// Decode an embedded icon PNG and upload it as a square texture. The pixels are
+/// premultiplied (smithay blends premultiplied alpha) so the icons' transparent
+/// corners and anti-aliased edges render correctly.
 fn load_icon(renderer: &mut GlesRenderer, bytes: &[u8]) -> Option<TextureBuffer<GlesTexture>> {
     let img = image::load_from_memory(bytes).ok()?;
     let scaled =
         img.resize_to_fill(ICON_TEX as u32, ICON_TEX as u32, image::imageops::FilterType::Lanczos3);
-    let rgba = scaled.to_rgba8();
+    let mut rgba = scaled.to_rgba8();
+    for px in rgba.pixels_mut() {
+        let alpha = px[3] as u16;
+        px[0] = (px[0] as u16 * alpha / 255) as u8;
+        px[1] = (px[1] as u16 * alpha / 255) as u8;
+        px[2] = (px[2] as u16 * alpha / 255) as u8;
+    }
     TextureBuffer::from_memory(
         renderer,
         rgba.as_raw(),
