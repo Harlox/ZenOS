@@ -554,20 +554,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return;
                 }
 
-                let under = data.space.element_under(loc).map(|(w, p)| (w.clone(), p));
-                if let Some((window, win_loc)) = under {
-                    let keyboard = data.seat.get_keyboard().unwrap();
-                    let mods = keyboard.modifier_state();
+                // Click on window content = focus only. Moving is done by
+                // dragging the titlebar (handled above), no modifier needed.
+                let under = data.space.element_under(loc).map(|(w, _)| w.clone());
+                if let Some(window) = under {
                     if let Some(s) = window.toplevel().map(|t| t.wl_surface().clone()) {
+                        let keyboard = data.seat.get_keyboard().unwrap();
                         keyboard.set_focus(data, Some(s), serial);
-                    }
-                    // Super + left drag = move the window.
-                    if mods.logo && button == BTN_LEFT {
-                        data.move_grab = Some(MoveGrab {
-                            window,
-                            start_ptr: loc,
-                            start_win: win_loc,
-                        });
                     }
                 }
             } else {
