@@ -69,6 +69,15 @@ impl CompositorHandler for ZenState {
                         toplevel.send_configure();
                     }
                 }
+                // (Re)assert keyboard focus now that the window is mapped, so
+                // typed keys actually reach it. set_focus is a no-op if already
+                // focused.
+                if let Some(keyboard) = self.seat.get_keyboard() {
+                    if keyboard.current_focus().as_ref() != Some(&root) {
+                        let serial = SERIAL_COUNTER.next_serial();
+                        keyboard.set_focus(self, Some(root.clone()), serial);
+                    }
+                }
             }
         }
         self.popups.commit(surface);
