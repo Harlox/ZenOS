@@ -30,13 +30,14 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::reexports::input::Libinput;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
 use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::desktop::{Space, Window};
 use smithay::render_elements;
-use smithay::utils::Scale;
+use smithay::utils::{Scale, Transform};
 use smithay::backend::renderer::gles::{
-    GlesPixelProgram, GlesRenderer, Uniform, UniformName, UniformType,
+    GlesPixelProgram, GlesRenderer, GlesTexture, Uniform, UniformName, UniformType,
 };
 use smithay::backend::renderer::Color32F;
 use smithay::backend::session::libseat::LibSeatSession;
@@ -47,7 +48,7 @@ use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::drm::control::{connector, Device as _};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::{DeviceFd, Rectangle, SERIAL_COUNTER};
+use smithay::utils::{DeviceFd, Point, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::socket::ListeningSocketSource;
 
 use std::sync::Arc;
@@ -113,6 +114,7 @@ render_elements! {
     pub ZenElement<=GlesRenderer>;
     Window = WaylandSurfaceRenderElement<GlesRenderer>,
     Ui = PixelShaderElement,
+    Wallpaper = TextureRenderElement<GlesTexture>,
 }
 
 /// One GPU: the DRM device, GBM allocator, GLES renderer and scanout compositor.
@@ -134,6 +136,8 @@ pub struct Gpu {
     pub pending_flip: bool,
     /// Cursor position in px (updated each frame from pointer_location).
     pub cursor_pos: (i32, i32),
+    /// Fullscreen wallpaper, pre-scaled to the screen. None = flat CLEAR bg.
+    pub wallpaper: Option<TextureBuffer<GlesTexture>>,
 }
 
 impl Gpu {
@@ -202,6 +206,20 @@ impl Gpu {
                 1.0,
             );
             elements.extend(rels.into_iter().map(ZenElement::Window));
+        }
+
+        // Wallpaper at the very bottom (drawn behind windows + UI). Opaque, so
+        // it hides the CLEAR background entirely.
+        if let Some(wp) = &self.wallpaper {
+            let element = TextureRenderElement::from_texture_buffer(
+                Point::from((0.0, 0.0)),
+                wp,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            );
+            elements.push(ZenElement::Wallpaper(element));
         }
 
         let res = self.compositor.render_frame::<_, ZenElement>(
@@ -564,6 +582,8 @@ fn open_gpu(
 
     let size = (mode.size().0 as i32, mode.size().1 as i32);
 
+    let wallpaper = load_wallpaper(&mut renderer, size.0, size.1);
+
     Ok((
         Gpu {
             node,
@@ -577,7 +597,50 @@ fn open_gpu(
             rounded,
             pending_flip: false,
             cursor_pos: (0, 0),
+            wallpaper,
         },
         drm_notifier,
     ))
+}
+
+/// Load the wallpaper from `$ZENOS_WALLPAPER` (default
+/// `/usr/local/share/zenos/wallpaper.png`), cover-scale it to the screen on the
+/// CPU, and upload as a GLES texture. Returns None (flat CLEAR bg) on any error.
+fn load_wallpaper(
+    renderer: &mut GlesRenderer,
+    w: i32,
+    h: i32,
+) -> Option<TextureBuffer<GlesTexture>> {
+    let path = std::env::var("ZENOS_WALLPAPER")
+        .unwrap_or_else(|_| "/usr/local/share/zenos/wallpaper.png".to_string());
+    let img = match image::open(&path) {
+        Ok(img) => img,
+        Err(e) => {
+            tracing::warn!("no wallpaper at {path} ({e}); using flat background");
+            return None;
+        }
+    };
+    // Cover-scale: fill w×h exactly, cropping overflow, no distortion.
+    let scaled = img.resize_to_fill(w as u32, h as u32, image::imageops::FilterType::Lanczos3);
+    let rgba = scaled.to_rgba8();
+    // image RGBA8 byte order is R,G,B,A == DRM Abgr8888 (little-endian).
+    match TextureBuffer::from_memory(
+        renderer,
+        rgba.as_raw(),
+        Fourcc::Abgr8888,
+        (w, h),
+        false,
+        1,
+        Transform::Normal,
+        Some(vec![Rectangle::from_size((w, h).into())]),
+    ) {
+        Ok(buf) => {
+            tracing::info!("wallpaper loaded from {path} ({w}x{h})");
+            Some(buf)
+        }
+        Err(e) => {
+            tracing::error!("wallpaper import failed: {e}");
+            None
+        }
+    }
 }
