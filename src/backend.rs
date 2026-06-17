@@ -819,13 +819,18 @@ impl Gpu {
             return Ok(false);
         }
 
-        // F2 screenshot: export the already-rendered scene texture. This avoids
-        // sampling scene_tex while re-rendering into another offscreen target,
-        // which can produce empty readbacks on some GLES drivers.
+        // F2 screenshot: render the base scene directly into a readable
+        // offscreen texture. Do not render `overlay` here: it samples scene_tex
+        // for the frosted dock and can read back as blank on some GLES drivers.
         if shot {
             let mut capture = || -> Result<(), Box<dyn std::error::Error>> {
+                let mut shot_tex: GlesTexture =
+                    renderer.create_buffer(Fourcc::Abgr8888, Size::from((w, h)))?;
+                let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
+                let mut fb = renderer.bind(&mut shot_tex)?;
+                tracker.render_output(renderer, &mut fb, 0, &scene, Color32F::from(CLEAR))?;
                 let region = Rectangle::from_loc_and_size((0, 0), (w, h));
-                let mapping = renderer.copy_texture(&*scene_tex, region, Fourcc::Abgr8888)?;
+                let mapping = renderer.copy_framebuffer(&fb, region, Fourcc::Abgr8888)?;
                 let bytes = renderer.map_texture(&mapping)?;
                 let stride = w as usize * 4;
                 let mut flipped = vec![0u8; bytes.len()];
