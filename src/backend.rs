@@ -1,17 +1,13 @@
 //! DRM/KMS backend: ZenOS owns the screen directly, no weston/X11.
 //!
-//! Milestones covered:
-//!   1. libseat session (GPU/input access from a TTY without root)
-//!   2. udev: discover the primary GPU
-//!   3. open the DRM device + GBM allocator
-//!   4. EGL + GlesRenderer, pick connector/CRTC/mode, clear the screen (gray)
+//! Multi-output: one DRM device (`Gpu`) drives one `Surface` per connected
+//! connector (each its own CRTC + DrmCompositor + Output, positioned
+//! left-to-right in the global Space). Connectors are (re)scanned at boot and on
+//! udev "change" events, so monitors can be hot-plugged/unplugged.
 //!
-//! NOT yet: input (libinput), Wayland clients, hotplug, multi-GPU, the ZenOS
-//! UI (bar/dock). Those are milestones 5-8.
-//!
-//! User-mode DRM master is currently not granted by logind in this setup; run
-//! as root for now (see notes). smithay 0.7 API — Linux-only, iterate on the
-//! Arch target.
+//! Rendering is event-driven (see `run`): the loop blocks on events and the
+//! per-output flip chain is kept alive by VBlanks, so the frame rate tracks each
+//! monitor's refresh with no idle busy-spin.
 
 use std::time::Duration;
 
@@ -46,12 +42,14 @@ use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, Mode as CalloopMode, PostAction};
-use smithay::reexports::drm::control::{connector, Device as _};
+use smithay::reexports::drm::control::{connector, crtc, Device as _, ResourceHandles};
 use smithay::reexports::rustix::fs::OFlags;
-use smithay::reexports::wayland_server::Display;
-use smithay::utils::{DeviceFd, Point, Rectangle, SERIAL_COUNTER};
+use smithay::reexports::wayland_server::backend::GlobalId;
+use smithay::reexports::wayland_server::{Display, DisplayHandle};
+use smithay::utils::{DeviceFd, Logical, Point, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::socket::ListeningSocketSource;
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::state::{ClientState, MoveGrab};
@@ -144,8 +142,8 @@ void main() {
 }
 "#;
 
-/// The DrmCompositor type for one GPU: GBM allocator + GBM framebuffer exporter,
-/// `()` queue user-data, DrmDeviceFd-backed GBM.
+/// The DrmCompositor type for one output: GBM allocator + GBM framebuffer
+/// exporter, `()` queue user-data, DrmDeviceFd-backed GBM.
 type ZenCompositor =
     DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
 
@@ -158,41 +156,80 @@ render_elements! {
     Wallpaper = TextureRenderElement<GlesTexture>,
 }
 
-/// One GPU: the DRM device, GBM allocator, GLES renderer and scanout compositor.
+/// One connected output: its CRTC's scanout compositor + logical Output, placed
+/// at `location` in the global Space.
+pub struct Surface {
+    pub connector: connector::Handle,
+    pub output: Output,
+    pub global: GlobalId,
+    pub compositor: ZenCompositor,
+    /// Screen size in px (from the DRM mode).
+    pub size: (i32, i32),
+    /// Top-left position of this output in the global Space.
+    pub location: (i32, i32),
+    /// True while a page-flip is in flight (cleared on this output's VBlank).
+    pub pending_flip: bool,
+    /// Fullscreen wallpaper, pre-scaled to this output. None = flat CLEAR bg.
+    pub wallpaper: Option<TextureBuffer<GlesTexture>>,
+}
+
+/// One GPU: the DRM device, GBM allocator, GLES renderer, shaders, and one
+/// scanout Surface per connected output (keyed by CRTC).
 pub struct Gpu {
     pub node: DrmNode,
     pub drm: DrmDevice,
     pub gbm: GbmDevice<DrmDeviceFd>,
     pub allocator: GbmAllocator<DrmDeviceFd>,
     pub renderer: GlesRenderer,
-    /// Logical output: drives the DrmCompositor mode and is mapped into the Space.
-    pub output: Output,
-    pub compositor: ZenCompositor,
-    /// Screen size in px (from the DRM mode).
-    pub size: (i32, i32),
     /// Compiled rounded-rect pixel shader, reused for bar + dock + lights.
     pub rounded: GlesPixelProgram,
     /// Top-only rounded-rect shader, for SSD titlebars.
     pub rounded_top: GlesPixelProgram,
-    /// True while a page-flip is in flight (cleared on VBlank). Avoids queuing a
-    /// second flip before the first completes.
-    pub pending_flip: bool,
-    /// Cursor position in px (updated each frame from pointer_location).
-    pub cursor_pos: (i32, i32),
-    /// Fullscreen wallpaper, pre-scaled to the screen. None = flat CLEAR bg.
-    pub wallpaper: Option<TextureBuffer<GlesTexture>>,
+    /// One Surface per connected output, keyed by its CRTC handle.
+    pub surfaces: HashMap<crtc::Handle, Surface>,
 }
 
 impl Gpu {
-    /// Render one frame: client windows below, ZenOS UI (bar/dock) on top, over
-    /// a clear background, then page-flip.
-    /// Returns true if a frame was actually queued (had damage).
-    pub fn render(&mut self, space: &Space<Window>) -> Result<bool, Box<dyn std::error::Error>> {
-        let (w, h) = self.size;
+    /// Render every output that isn't mid-flip.
+    pub fn render_all(&mut self, space: &Space<Window>, cursor: (i32, i32)) {
+        let crtcs: Vec<crtc::Handle> = self.surfaces.keys().copied().collect();
+        for crtc in crtcs {
+            if let Err(e) = self.render_surface(crtc, space, cursor) {
+                tracing::error!("render surface failed: {e}");
+            }
+        }
+    }
+
+    /// Render one output: client windows + SSD titlebars below, ZenOS UI on top,
+    /// over the wallpaper/clear background, then page-flip. Elements are placed
+    /// in this output's local coordinates (global coords minus the output's
+    /// location). Returns true if a frame was queued (had damage).
+    fn render_surface(
+        &mut self,
+        crtc: crtc::Handle,
+        space: &Space<Window>,
+        cursor: (i32, i32),
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let Gpu {
+            renderer,
+            rounded,
+            rounded_top,
+            surfaces,
+            ..
+        } = self;
+        let Some(surface) = surfaces.get_mut(&crtc) else {
+            return Ok(false);
+        };
+        if surface.pending_flip {
+            return Ok(false);
+        }
+        let (w, h) = surface.size;
+        let (ox, oy) = surface.location;
+
         let dock_x = (w - DOCK_W) / 2;
         let dock_y = h - DOCK_H - DOCK_MARGIN;
         let bar = PixelShaderElement::new(
-            self.rounded.clone(),
+            rounded.clone(),
             Rectangle::from_loc_and_size((0, 0), (w, BAR_H)),
             None,
             1.0,
@@ -204,7 +241,7 @@ impl Gpu {
             Kind::Unspecified,
         );
         let dock = PixelShaderElement::new(
-            self.rounded.clone(),
+            rounded.clone(),
             Rectangle::from_loc_and_size((dock_x, dock_y), (DOCK_W, DOCK_H)),
             None,
             1.0,
@@ -216,10 +253,9 @@ impl Gpu {
             Kind::Unspecified,
         );
 
-        let (cx, cy) = self.cursor_pos;
-        let cursor = PixelShaderElement::new(
-            self.rounded.clone(),
-            Rectangle::from_loc_and_size((cx, cy), (CURSOR_SIZE, CURSOR_SIZE)),
+        let cursor_el = PixelShaderElement::new(
+            rounded.clone(),
+            Rectangle::from_loc_and_size((cursor.0 - ox, cursor.1 - oy), (CURSOR_SIZE, CURSOR_SIZE)),
             None,
             1.0,
             vec![
@@ -230,23 +266,25 @@ impl Gpu {
             Kind::Unspecified,
         );
 
-        // Front-to-back: cursor, UI, then client windows.
+        // Front-to-back: cursor, UI, then client windows + decorations.
         let mut elements: Vec<ZenElement> = vec![
-            ZenElement::Ui(cursor),
+            ZenElement::Ui(cursor_el),
             ZenElement::Ui(bar),
             ZenElement::Ui(dock),
         ];
         let scale = Scale::from(1.0);
         for window in space.elements() {
-            let loc_logical = space.element_location(window).unwrap_or_default();
+            let g = space.element_location(window).unwrap_or_default();
+            let lx = g.x - ox;
+            let ly = g.y - oy;
             let geo = window.geometry();
 
             // macOS-style SSD: titlebar above the surface + traffic lights.
             if geo.size.w > 0 {
-                let tx = loc_logical.x;
-                let ty = loc_logical.y - TITLEBAR_H;
+                let tx = lx;
+                let ty = ly - TITLEBAR_H;
                 let titlebar = PixelShaderElement::new(
-                    self.rounded_top.clone(),
+                    rounded_top.clone(),
                     Rectangle::from_loc_and_size((tx, ty), (geo.size.w, TITLEBAR_H)),
                     None,
                     1.0,
@@ -260,10 +298,10 @@ impl Gpu {
                 );
                 let light_y = ty + (TITLEBAR_H - LIGHT_DIA) / 2;
                 for (i, color) in [LIGHT_CLOSE, LIGHT_MIN, LIGHT_MAX].into_iter().enumerate() {
-                    let lx = tx + LIGHT_MARGIN + i as i32 * LIGHT_SPACING;
+                    let lcx = tx + LIGHT_MARGIN + i as i32 * LIGHT_SPACING;
                     let light = PixelShaderElement::new(
-                        self.rounded.clone(),
-                        Rectangle::from_loc_and_size((lx, light_y), (LIGHT_DIA, LIGHT_DIA)),
+                        rounded.clone(),
+                        Rectangle::from_loc_and_size((lcx, light_y), (LIGHT_DIA, LIGHT_DIA)),
                         None,
                         1.0,
                         vec![
@@ -278,9 +316,9 @@ impl Gpu {
                 elements.push(ZenElement::Ui(titlebar));
             }
 
-            let loc = loc_logical.to_physical_precise_round(1.0);
+            let loc = Point::<i32, Logical>::from((lx, ly)).to_physical_precise_round(1.0);
             let rels = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                &mut self.renderer,
+                renderer,
                 loc,
                 scale,
                 1.0,
@@ -290,7 +328,7 @@ impl Gpu {
 
         // Wallpaper at the very bottom (drawn behind windows + UI). Opaque, so
         // it hides the CLEAR background entirely.
-        if let Some(wp) = &self.wallpaper {
+        if let Some(wp) = &surface.wallpaper {
             let element = TextureRenderElement::from_texture_buffer(
                 Point::from((0.0, 0.0)),
                 wp,
@@ -302,8 +340,8 @@ impl Gpu {
             elements.push(ZenElement::Wallpaper(element));
         }
 
-        let res = self.compositor.render_frame::<_, ZenElement>(
-            &mut self.renderer,
+        let res = surface.compositor.render_frame::<_, ZenElement>(
+            renderer,
             &elements,
             Color32F::from(CLEAR),
             FrameFlags::DEFAULT,
@@ -311,7 +349,8 @@ impl Gpu {
         if res.is_empty {
             return Ok(false); // no damage -> nothing to flip
         }
-        self.compositor.queue_frame(())?;
+        surface.compositor.queue_frame(())?;
+        surface.pending_flip = true;
         Ok(true)
     }
 }
@@ -402,33 +441,24 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     tracing::info!("session active after {tries} dispatch(es)");
 
-    // Open + init the primary GPU (steps 3-4).
-    let (mut gpu, drm_notifier) = open_gpu(&mut state.session, primary, &dev_path)?;
-
-    // First frame: starts the page-flip chain.
-    match gpu.render(&state.space) {
-        Ok(true) => {
-            gpu.pending_flip = true;
-            tracing::info!("first frame submitted");
-        }
-        Ok(false) => {}
-        Err(e) => tracing::error!("first render failed: {e}"),
+    // Open the DRM device, then scan connectors -> one Surface per output.
+    let (mut gpu, drm_notifier) = open_device(&mut state.session, primary, &dev_path)?;
+    scan_connectors(&mut gpu, &mut state.space, &state.display_handle)?;
+    if gpu.surfaces.is_empty() {
+        return Err("no connected output".into());
     }
-    // Advertise the output to clients (wl_output global) so they see a monitor,
-    // then map it into the Space.
-    let _output_global = gpu.output.create_global::<ZenState>(&state.display_handle);
-    state.space.map_output(&gpu.output, (0, 0));
     state.gpu = Some(gpu);
 
-    // DRM VBlank: the heartbeat. Ack the completed flip, release clients to draw
-    // their next frame (throttled to the monitor refresh), then render again so
-    // any damage that landed during the flip is shown and the flip chain keeps
-    // running. At max refresh the chain is: render -> flip -> vblank -> render.
+    // DRM VBlank: per-output heartbeat. Ack the finished flip on that CRTC,
+    // release clients to draw their next frame (throttled to the monitor
+    // refresh), then render again so any damage shows and the chain keeps going.
     handle.insert_source(drm_notifier, move |event, _, data| match event {
-        DrmEvent::VBlank(_crtc) => {
+        DrmEvent::VBlank(crtc) => {
             if let Some(gpu) = &mut data.gpu {
-                let _ = gpu.compositor.frame_submitted();
-                gpu.pending_flip = false;
+                if let Some(surface) = gpu.surfaces.get_mut(&crtc) {
+                    let _ = surface.compositor.frame_submitted();
+                    surface.pending_flip = false;
+                }
             }
             data.send_frame_callbacks();
             data.render();
@@ -436,9 +466,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         DrmEvent::Error(e) => tracing::error!("DRM error: {e:?}"),
     })?;
 
-    handle.insert_source(udev_backend, move |event, _, _data| match event {
+    // udev "change" = a monitor was (un)plugged: rescan connectors and add/remove
+    // outputs, then redraw.
+    handle.insert_source(udev_backend, move |event, _, data| match event {
+        UdevEvent::Changed { device_id } => {
+            tracing::info!("udev change {device_id}, rescanning outputs");
+            let dh = data.display_handle.clone();
+            if let Some(mut gpu) = data.gpu.take() {
+                if let Err(e) = scan_connectors(&mut gpu, &mut data.space, &dh) {
+                    tracing::error!("rescan failed: {e}");
+                }
+                data.gpu = Some(gpu);
+            }
+            data.render();
+        }
         UdevEvent::Added { device_id, .. } => tracing::debug!("udev add {device_id}"),
-        UdevEvent::Changed { device_id } => tracing::debug!("udev change {device_id}"),
         UdevEvent::Removed { device_id } => tracing::debug!("udev remove {device_id}"),
     })?;
 
@@ -473,10 +515,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         InputEvent::PointerMotion { event } => {
-            let (sw, sh) = data.gpu.as_ref().map(|g| g.size).unwrap_or((0, 0));
+            // Clamp to the union of all outputs (multi-monitor desktop spans
+            // left-to-right).
+            let (mut maxw, mut maxh) = (0i32, 0i32);
+            if let Some(gpu) = &data.gpu {
+                for s in gpu.surfaces.values() {
+                    maxw = maxw.max(s.location.0 + s.size.0);
+                    maxh = maxh.max(s.location.1 + s.size.1);
+                }
+            }
             let mut loc = data.pointer_location;
-            loc.x = (loc.x + event.delta_x()).clamp(0.0, sw as f64);
-            loc.y = (loc.y + event.delta_y()).clamp(0.0, sh as f64);
+            loc.x = (loc.x + event.delta_x()).clamp(0.0, maxw as f64);
+            loc.y = (loc.y + event.delta_y()).clamp(0.0, maxh as f64);
             data.pointer_location = loc;
 
             if let Some(grab) = &data.move_grab {
@@ -608,6 +658,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("auto-exit in {timeout}s (set ZENOS_TIMEOUT to change, 0 to disable)");
     }
 
+    // Kick the first frame on every output to start their flip chains.
+    state.render();
+
     // --- Dispatch loop -------------------------------------------------------
     // Event-driven: block until something happens (input, client request, or a
     // VBlank), then service it and try to render. Rendering itself is gated by
@@ -638,9 +691,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Steps 3-4: open the DRM device, GBM allocator, EGL/GLES renderer, then pick a
-/// connected connector + CRTC + mode and build the scanout compositor.
-fn open_gpu(
+/// Open the DRM device + GBM allocator + EGL/GLES renderer and compile the
+/// shaders. Outputs are added later by `scan_connectors`.
+fn open_device(
     session: &mut LibSeatSession,
     node: DrmNode,
     path: &std::path::Path,
@@ -648,7 +701,7 @@ fn open_gpu(
     let fd = session.open(path, OFlags::RDWR | OFlags::CLOEXEC)?;
     let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
-    let (mut drm, drm_notifier) = DrmDevice::new(drm_fd.clone(), true)?;
+    let (drm, drm_notifier) = DrmDevice::new(drm_fd.clone(), true)?;
     let gbm = GbmDevice::new(drm_fd)?;
 
     let allocator = GbmAllocator::new(
@@ -660,7 +713,7 @@ fn open_gpu(
     let egl_context = EGLContext::new(&egl_display)?;
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
 
-    // Rounded-rect shader, reused by the bar and dock.
+    // Rounded-rect shader, reused by the bar, dock, lights and cursor.
     let rounded = renderer.compile_custom_pixel_shader(
         ROUNDED_SHADER,
         &[
@@ -681,16 +734,85 @@ fn open_gpu(
         ],
     )?;
 
-    // --- pick a connected connector + its preferred mode --------------------
-    let res = drm.resource_handles()?;
-    let conn = res
+    Ok((
+        Gpu {
+            node,
+            drm,
+            gbm,
+            allocator,
+            renderer,
+            rounded,
+            rounded_top,
+            surfaces: HashMap::new(),
+        },
+        drm_notifier,
+    ))
+}
+
+/// (Re)scan the device's connectors. Drops outputs whose connector disconnected,
+/// adds a Surface for each newly connected one, and re-lays-out the outputs.
+/// Returns true if anything changed.
+fn scan_connectors(
+    gpu: &mut Gpu,
+    space: &mut Space<Window>,
+    dh: &DisplayHandle,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let res = gpu.drm.resource_handles()?;
+    let connected: Vec<connector::Info> = res
         .connectors()
         .iter()
-        .filter_map(|h| drm.get_connector(*h, false).ok())
-        .find(|c| c.state() == connector::State::Connected)
-        .ok_or("no connected connector")?;
-    // Pick the highest refresh at the largest resolution (tie-break on Hz), so
-    // a 120/165Hz panel runs at full rate instead of whatever DRM lists first.
+        .filter_map(|h| gpu.drm.get_connector(*h, false).ok())
+        .filter(|c| c.state() == connector::State::Connected)
+        .collect();
+    let connected_handles: HashSet<connector::Handle> =
+        connected.iter().map(|c| c.handle()).collect();
+
+    let mut changed = false;
+
+    // Remove outputs whose connector is gone.
+    let gone: Vec<crtc::Handle> = gpu
+        .surfaces
+        .iter()
+        .filter(|(_, s)| !connected_handles.contains(&s.connector))
+        .map(|(crtc, _)| *crtc)
+        .collect();
+    for crtc in gone {
+        if let Some(s) = gpu.surfaces.remove(&crtc) {
+            tracing::info!("output removed: {:?}", s.output.name());
+            space.unmap_output(&s.output);
+            dh.remove_global::<ZenState>(s.global);
+            changed = true;
+        }
+    }
+
+    // Add outputs for newly connected connectors.
+    let have: HashSet<connector::Handle> =
+        gpu.surfaces.values().map(|s| s.connector).collect();
+    for conn in &connected {
+        if have.contains(&conn.handle()) {
+            continue;
+        }
+        match create_surface(gpu, conn, &res, dh) {
+            Ok(()) => changed = true,
+            Err(e) => tracing::error!("failed to add output {:?}: {e}", conn.interface()),
+        }
+    }
+
+    if changed {
+        relayout_outputs(gpu, space);
+    }
+    Ok(changed)
+}
+
+/// Build a Surface (CRTC + scanout compositor + Output + global) for one
+/// connected connector and insert it into the Gpu.
+fn create_surface(
+    gpu: &mut Gpu,
+    conn: &connector::Info,
+    res: &ResourceHandles,
+    dh: &DisplayHandle,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Highest refresh at the largest resolution (tie-break on Hz).
     let mode = conn
         .modes()
         .iter()
@@ -700,34 +822,27 @@ fn open_gpu(
             (w as u64 * h as u64, m.vrefresh())
         })
         .ok_or("connector has no modes")?;
-    tracing::info!(
-        "connector {:?}, mode {}x{}@{}Hz",
-        conn.interface(),
-        mode.size().0,
-        mode.size().1,
-        mode.vrefresh()
-    );
 
-    // --- find a CRTC drivable by this connector's encoders ------------------
+    // Pick a CRTC drivable by this connector's encoders that isn't already used.
+    let used: HashSet<crtc::Handle> = gpu.surfaces.keys().copied().collect();
     let crtc = conn
         .encoders()
         .iter()
-        .filter_map(|e| drm.get_encoder(*e).ok())
+        .filter_map(|e| gpu.drm.get_encoder(*e).ok())
         .flat_map(|enc| res.filter_crtcs(enc.possible_crtcs()))
-        .next()
-        .ok_or("no CRTC for connector")?;
+        .find(|c| !used.contains(c))
+        .ok_or("no free CRTC for connector")?;
 
-    // --- scanout surface ----------------------------------------------------
-    let surface = drm.create_surface(crtc, mode, &[conn.handle()])?;
+    let drm_surface = gpu.drm.create_surface(crtc, mode, &[conn.handle()])?;
 
-    // --- logical output (drives the compositor's mode/scale) ----------------
+    let name = format!("{:?}-{}", conn.interface(), conn.interface_id());
     let output = Output::new(
-        "ZenOS-1".to_string(),
+        name.clone(),
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
             make: "ZenOS".into(),
-            model: "Virtual".into(),
+            model: name.clone(),
         },
     );
     let wl_mode = OutputMode {
@@ -737,46 +852,62 @@ fn open_gpu(
     output.change_current_state(Some(wl_mode), None, None, None);
     output.set_preferred(wl_mode);
 
-    // --- compositor ---------------------------------------------------------
-    let render_formats = renderer.egl_context().dmabuf_render_formats().clone();
+    let render_formats = gpu.renderer.egl_context().dmabuf_render_formats().clone();
     let compositor = DrmCompositor::new(
         &output,
-        surface,
+        drm_surface,
         None,
-        allocator.clone(),
-        GbmFramebufferExporter::new(gbm.clone(), Some(node)),
+        gpu.allocator.clone(),
+        GbmFramebufferExporter::new(gpu.gbm.clone(), Some(gpu.node)),
         [Fourcc::Argb8888, Fourcc::Xrgb8888],
         render_formats,
         (64u32, 64u32).into(),
-        Some(gbm.clone()),
+        Some(gpu.gbm.clone()),
     )?;
 
     let size = (mode.size().0 as i32, mode.size().1 as i32);
+    let wallpaper = load_wallpaper(&mut gpu.renderer, size.0, size.1);
+    let global = output.create_global::<ZenState>(dh);
 
-    let wallpaper = load_wallpaper(&mut renderer, size.0, size.1);
+    tracing::info!(
+        "output added: {name} {}x{}@{}Hz",
+        size.0,
+        size.1,
+        mode.vrefresh()
+    );
 
-    Ok((
-        Gpu {
-            node,
-            drm,
-            gbm,
-            allocator,
-            renderer,
+    gpu.surfaces.insert(
+        crtc,
+        Surface {
+            connector: conn.handle(),
             output,
+            global,
             compositor,
             size,
-            rounded,
-            rounded_top,
+            location: (0, 0),
             pending_flip: false,
-            cursor_pos: (0, 0),
             wallpaper,
         },
-        drm_notifier,
-    ))
+    );
+    Ok(())
+}
+
+/// Position outputs left-to-right (stable order by CRTC) in the global Space.
+fn relayout_outputs(gpu: &mut Gpu, space: &mut Space<Window>) {
+    let mut crtcs: Vec<crtc::Handle> = gpu.surfaces.keys().copied().collect();
+    crtcs.sort();
+    let mut x = 0;
+    for crtc in crtcs {
+        if let Some(s) = gpu.surfaces.get_mut(&crtc) {
+            s.location = (x, 0);
+            space.map_output(&s.output, (x, 0));
+            x += s.size.0;
+        }
+    }
 }
 
 /// Load the wallpaper from `$ZENOS_WALLPAPER` (default
-/// `/usr/local/share/zenos/wallpaper.png`), cover-scale it to the screen on the
+/// `/usr/local/share/zenos/wallpaper.png`), cover-scale it to the output on the
 /// CPU, and upload as a GLES texture. Returns None (flat CLEAR bg) on any error.
 fn load_wallpaper(
     renderer: &mut GlesRenderer,

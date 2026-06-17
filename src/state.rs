@@ -109,14 +109,8 @@ impl ZenState {
         } = self;
         let Some(gpu) = gpu else { return };
 
-        gpu.cursor_pos = (pointer_location.x as i32, pointer_location.y as i32);
-        if !gpu.pending_flip {
-            match gpu.render(space) {
-                Ok(true) => gpu.pending_flip = true,
-                Ok(false) => {}
-                Err(e) => tracing::error!("render failed: {e}"),
-            }
-        }
+        let cursor = (pointer_location.x as i32, pointer_location.y as i32);
+        gpu.render_all(space, cursor);
     }
 
     /// Tell clients they may draw the next frame. Called once per VBlank, so a
@@ -126,9 +120,11 @@ impl ZenState {
     pub fn send_frame_callbacks(&mut self) {
         let Some(gpu) = &self.gpu else { return };
         let now = self.start_time.elapsed();
-        let output = gpu.output.clone();
-        for w in self.space.elements() {
-            w.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()));
+        for surface in gpu.surfaces.values() {
+            let output = surface.output.clone();
+            for w in self.space.elements() {
+                w.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()));
+            }
         }
     }
 }
