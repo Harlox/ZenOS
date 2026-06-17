@@ -278,6 +278,44 @@ void main() {
 }
 "#;
 
+/// Rounded mask for dock icons: samples the (premultiplied) icon and clips it to
+/// a rounded square, removing the square texture edge / corner artifacts.
+const ICON_MASK_SHADER: &str = r#"#version 100
+//_DEFINES_
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+#extension GL_OES_standard_derivatives : enable
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+uniform float alpha;
+varying vec2 v_coords;
+uniform float u_radius;
+uniform vec2 u_size;
+
+float sd_rounded_box(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+}
+
+void main() {
+    vec4 c = texture2D(tex, v_coords);
+    vec2 p = v_coords * u_size - u_size * 0.5;
+    float d = sd_rounded_box(p, u_size * 0.5, u_radius);
+    float cov = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
+    // c is premultiplied; scaling rgb+a by coverage keeps it premultiplied.
+    gl_FragColor = c * (cov * alpha);
+}
+"#;
+
 /// Rounded box with a highlight border (inner stroke) — for the macOS-style
 /// dock: translucent body + a bright 1px rim.
 const BORDERED_SHADER: &str = r#"
@@ -403,8 +441,10 @@ pub struct Gpu {
     pub rounded_top: GlesPixelProgram,
     /// Rounded-rect-with-border shader, for the dock.
     pub bordered: GlesPixelProgram,
-    /// Texture shader: rounded-masked sampling of the blurred wallpaper.
+    /// Texture shader: gaussian-blurred + rounded-masked sampling (dock backdrop).
     pub blur_mask: GlesTexProgram,
+    /// Texture shader: rounded mask for dock icons (squircle clip).
+    pub icon_mask: GlesTexProgram,
     /// Dock app icons (device-level, loaded once), one per DOCK_APPS entry.
     /// None = icon file missing -> a placeholder square is drawn.
     pub dock_icons: Vec<Option<TextureBuffer<GlesTexture>>>,
@@ -460,6 +500,7 @@ impl Gpu {
             rounded_top,
             bordered,
             blur_mask,
+            icon_mask,
             dock_icons,
             surfaces,
             text,
@@ -671,13 +712,23 @@ impl Gpu {
                         (0.0, 0.0),
                         (ICON_TEX as f64, ICON_TEX as f64),
                     );
-                    overlay.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
+                    let inner = TextureRenderElement::from_texture_buffer(
                         Point::from((x as f64, y as f64)),
                         tex,
                         None,
                         Some(src),
                         Some(Size::from((size, size))),
                         Kind::Unspecified,
+                    );
+                    // Squircle-mask the icon so its corners are uniformly rounded
+                    // (kills the square texture-edge artifact).
+                    overlay.push(ZenElement::Blur(TextureShaderElement::new(
+                        inner,
+                        icon_mask.clone(),
+                        vec![
+                            Uniform::new("u_radius", radius),
+                            Uniform::new("u_size", [size as f32, size as f32]),
+                        ],
                     )));
                 }
                 _ => {
@@ -1225,6 +1276,14 @@ fn open_device(
         ],
     )?;
 
+    let icon_mask = renderer.compile_custom_texture_shader(
+        ICON_MASK_SHADER,
+        &[
+            UniformName::new("u_radius", UniformType::_1f),
+            UniformName::new("u_size", UniformType::_2f),
+        ],
+    )?;
+
     // Dock icons (load once at device open).
     let dock_icons = DOCK_APPS
         .iter()
@@ -1242,6 +1301,7 @@ fn open_device(
             rounded_top,
             bordered,
             blur_mask,
+            icon_mask,
             dock_icons,
             surfaces: HashMap::new(),
             frames: 0,
