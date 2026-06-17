@@ -26,6 +26,8 @@ pub struct ZenState {
     /// `render` only composes + flips when dirty, then clears it — this is what
     /// keeps the 2-pass renderer from flipping every VBlank.
     pub dirty: bool,
+    /// Set by F2: capture the next frame to /tmp/zenos-shot.png.
+    pub screenshot: bool,
 
     // --- backend ---
     pub session: LibSeatSession,
@@ -82,6 +84,7 @@ impl ZenState {
             running: true,
             start_time: Instant::now(),
             dirty: true,
+            screenshot: false,
             session,
             gpu: None,
             display_handle: dh,
@@ -109,6 +112,7 @@ impl ZenState {
         if !self.dirty {
             return;
         }
+        let shot = self.screenshot;
         let Self {
             gpu,
             space,
@@ -120,9 +124,10 @@ impl ZenState {
         let cursor = (pointer_location.x as i32, pointer_location.y as i32);
         // Clear dirty only if every output was rendered (none mid-flip); a
         // skipped output retries on its next VBlank-driven render.
-        if gpu.render_all(space, cursor) {
+        if gpu.render_all(space, cursor, shot) {
             self.dirty = false;
         }
+        self.screenshot = false;
     }
 
     /// Tell clients they may draw the next frame. Called once per VBlank, so a

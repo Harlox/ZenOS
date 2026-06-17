@@ -36,7 +36,7 @@ use smithay::backend::renderer::gles::{
     GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName, UniformType,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::{Bind, Color32F, Offscreen};
+use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
@@ -170,6 +170,7 @@ const DOCK_APPS: &[DockApp] = &[
 /// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
 const KEY_ESC: u32 = 9; // evdev KEY_ESC 1 -> quit
 const KEY_F1: u32 = 67; // evdev KEY_F1 59 -> spawn a terminal (Enter stays free)
+const KEY_F2: u32 = 68; // evdev KEY_F2 60 -> screenshot to /tmp/zenos-shot.png
 const BAR_RADIUS: f32 = 0.0;
 const DOCK_RADIUS: f32 = 20.0;
 const CURSOR_SIZE: i32 = 12;
@@ -466,11 +467,11 @@ impl Gpu {
     /// Render every output that isn't mid-flip. Returns true if all outputs were
     /// rendered (none skipped for an in-flight flip), so the caller can clear the
     /// dirty flag.
-    pub fn render_all(&mut self, space: &Space<Window>, cursor: (i32, i32)) -> bool {
+    pub fn render_all(&mut self, space: &Space<Window>, cursor: (i32, i32), shot: bool) -> bool {
         let crtcs: Vec<crtc::Handle> = self.surfaces.keys().copied().collect();
         let mut all_done = true;
         for crtc in crtcs {
-            match self.render_surface(crtc, space, cursor) {
+            match self.render_surface(crtc, space, cursor, shot) {
                 Ok(true) => self.frames += 1,
                 Ok(false) => all_done = false, // mid-flip; retry after its VBlank
                 Err(e) => tracing::error!("render surface failed: {e}"),
@@ -498,6 +499,7 @@ impl Gpu {
         crtc: crtc::Handle,
         space: &Space<Window>,
         cursor: (i32, i32),
+        shot: bool,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let Gpu {
             renderer,
@@ -818,6 +820,33 @@ impl Gpu {
         }
         compositor.queue_frame(())?;
         *pending_flip = true;
+
+        // F2 screenshot: re-render the full frame into a temp texture and save
+        // it (clean, unlike a phone photo). Rare path; ignore on error.
+        if shot {
+            let capture = || -> Result<(), Box<dyn std::error::Error>> {
+                let mut shot_tex =
+                    renderer.create_buffer(Fourcc::Abgr8888, Size::from((w, h)))?;
+                let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
+                let mut fb = renderer.bind(&mut shot_tex)?;
+                tracker.render_output(renderer, &mut fb, 0, &overlay, Color32F::from(CLEAR))?;
+                let region = Rectangle::from_loc_and_size((0, 0), (w, h));
+                let mapping = renderer.copy_framebuffer(&fb, region, Fourcc::Abgr8888)?;
+                let bytes = renderer.map_texture(&mapping)?;
+                image::save_buffer(
+                    "/tmp/zenos-shot.png",
+                    bytes,
+                    w as u32,
+                    h as u32,
+                    image::ExtendedColorType::Rgba8,
+                )?;
+                Ok(())
+            };
+            match capture() {
+                Ok(()) => tracing::info!("screenshot saved to /tmp/zenos-shot.png"),
+                Err(e) => tracing::error!("screenshot failed: {e}"),
+            }
+        }
         Ok(true)
     }
 }
@@ -987,6 +1016,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     } else if code == KEY_F1.into() {
                         tracing::info!("F1 pressed, launching foot");
                         let _ = std::process::Command::new("foot").spawn();
+                        return FilterResult::Intercept(());
+                    } else if code == KEY_F2.into() {
+                        tracing::info!("F2 pressed, screenshot");
+                        data.screenshot = true;
                         return FilterResult::Intercept(());
                     }
                 }
