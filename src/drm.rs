@@ -13,6 +13,7 @@ use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::Offscreen;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::Session;
+use smithay::desktop::{Space, Window};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::drm::control::{connector, crtc, Device as _, Mode as DrmMode, ResourceHandles};
 use smithay::reexports::rustix::fs::OFlags;

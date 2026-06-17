@@ -27,7 +27,7 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode as CalloopMode, PostAction};
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::{Rectangle, SERIAL_COUNTER};
+use smithay::utils::{Point, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::socket::ListeningSocketSource;
 
 use std::sync::Arc;
@@ -275,9 +275,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let (ox, oy) = s.location;
                             for (i, app) in DOCK_APPS.iter().enumerate() {
                                 let (ix, iy) = dock_icon_pos(sw, sh, i, DOCK_APPS.len());
-                                let r = Rectangle::from_loc_and_size(
-                                    (ox + ix, oy + iy),
-                                    (ICON_SIZE, ICON_SIZE),
+                                let r = Rectangle::new(
+                                    Point::from((ox + ix, oy + iy)),
+                                    Size::from((ICON_SIZE, ICON_SIZE)),
                                 );
                                 if r.to_f64().contains(loc) {
                                     launch = Some(app.exec);
@@ -314,9 +314,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         if gw <= 0 {
                             continue;
                         }
-                        let tb = Rectangle::from_loc_and_size(
-                            (wl.x, wl.y - TITLEBAR_H),
-                            (gw, TITLEBAR_H),
+                        let tb = Rectangle::new(
+                            Point::from((wl.x, wl.y - TITLEBAR_H)),
+                            Size::from((gw, TITLEBAR_H)),
                         );
                         if tb.to_f64().contains(loc) {
                             found = Some((window.clone(), wl));
@@ -331,9 +331,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         keyboard.set_focus(data, Some(s), serial);
                     }
                     // First traffic light = close.
-                    let close = Rectangle::from_loc_and_size(
-                        (wl.x + LIGHT_MARGIN, wl.y - TITLEBAR_H + (TITLEBAR_H - LIGHT_DIA) / 2),
-                        (LIGHT_DIA, LIGHT_DIA),
+                    let close = Rectangle::new(
+                        Point::from((wl.x + LIGHT_MARGIN, wl.y - TITLEBAR_H + (TITLEBAR_H - LIGHT_DIA) / 2)),
+                        Size::from((LIGHT_DIA, LIGHT_DIA)),
                     );
                     if button == BTN_LEFT && close.to_f64().contains(loc) {
                         if let Some(t) = window.toplevel() {

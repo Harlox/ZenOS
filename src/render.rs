@@ -199,7 +199,7 @@ impl Gpu {
         // Top bar.
         scene.push(ZenElement::Ui(PixelShaderElement::new(
             rounded.clone(),
-            Rectangle::from_loc_and_size((0, 0), (w, BAR_H)),
+            Rectangle::new(Point::from((0, 0)), Size::from((w, BAR_H))),
             None,
             1.0,
             vec![
@@ -221,7 +221,7 @@ impl Gpu {
                 let ty = ly - TITLEBAR_H;
                 let titlebar = PixelShaderElement::new(
                     rounded_top.clone(),
-                    Rectangle::from_loc_and_size((tx, ty), (geo.size.w, TITLEBAR_H)),
+                    Rectangle::new(Point::from((tx, ty)), Size::from((geo.size.w, TITLEBAR_H))),
                     None,
                     1.0,
                     vec![
@@ -237,7 +237,7 @@ impl Gpu {
                     let lcx = tx + LIGHT_MARGIN + i as i32 * LIGHT_SPACING;
                     scene.push(ZenElement::Ui(PixelShaderElement::new(
                         rounded.clone(),
-                        Rectangle::from_loc_and_size((lcx, light_y), (LIGHT_DIA, LIGHT_DIA)),
+                        Rectangle::new(Point::from((lcx, light_y)), Size::from((LIGHT_DIA, LIGHT_DIA))),
                         None,
                         1.0,
                         vec![
@@ -305,7 +305,7 @@ impl Gpu {
 
         let cursor_el = PixelShaderElement::new(
             rounded.clone(),
-            Rectangle::from_loc_and_size((cursor.0 - ox, cursor.1 - oy), (CURSOR_SIZE, CURSOR_SIZE)),
+            Rectangle::new(Point::from((cursor.0 - ox, cursor.1 - oy)), Size::from((CURSOR_SIZE, CURSOR_SIZE))),
             None,
             1.0,
             vec![
@@ -333,7 +333,7 @@ impl Gpu {
                 let sy = baseline - ICON_SIZE + 8;
                 overlay.push(ZenElement::Ui(PixelShaderElement::new(
                     rounded.clone(),
-                    Rectangle::from_loc_and_size((sx, sy), (2, sh)),
+                    Rectangle::new(Point::from((sx, sy)), Size::from((2, sh))),
                     None,
                     1.0,
                     vec![
@@ -358,10 +358,7 @@ impl Gpu {
             let radius = size as f32 * ICON_RADIUS_FRAC;
             match dock_icons.get(i) {
                 Some(Some(tex)) => {
-                    let src = Rectangle::<f64, Logical>::from_loc_and_size(
-                        (0.0, 0.0),
-                        (ICON_TEX as f64, ICON_TEX as f64),
-                    );
+                    let src = Rectangle::<f64, Logical>::new(Point::from((0.0, 0.0)), Size::from((ICON_TEX as f64, ICON_TEX as f64)));
                     let inner = TextureRenderElement::from_texture_buffer(
                         Point::from((x as f64, y as f64)),
                         tex,
@@ -384,7 +381,7 @@ impl Gpu {
                 _ => {
                     overlay.push(ZenElement::Ui(PixelShaderElement::new(
                         rounded.clone(),
-                        Rectangle::from_loc_and_size((x, y), (size, size)),
+                        Rectangle::new(Point::from((x, y)), Size::from((size, size))),
                         None,
                         1.0,
                         vec![
@@ -401,7 +398,7 @@ impl Gpu {
         // Dock tint.
         overlay.push(ZenElement::Ui(PixelShaderElement::new(
             bordered.clone(),
-            Rectangle::from_loc_and_size((dock_x, dock_y), (dw, DOCK_H)),
+            Rectangle::new(Point::from((dock_x, dock_y)), Size::from((dw, DOCK_H))),
             None,
             1.0,
             vec![
@@ -415,10 +412,7 @@ impl Gpu {
         )));
 
         // Frosted backdrop: blur the scene under the dock, rounded-masked.
-        let src = Rectangle::<f64, Logical>::from_loc_and_size(
-            (dock_x as f64, dock_y as f64),
-            (dw as f64, DOCK_H as f64),
-        );
+        let src = Rectangle::<f64, Logical>::new(Point::from((dock_x as f64, dock_y as f64)), Size::from((dw as f64, DOCK_H as f64)));
         let inner = TextureRenderElement::from_texture_buffer(
             Point::from((dock_x as f64, dock_y as f64)),
             &scene_buf,
@@ -469,7 +463,7 @@ impl Gpu {
             let mut shot_elements: Vec<ZenElement> = Vec::new();
             shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
                 rounded.clone(),
-                Rectangle::from_loc_and_size((cursor.0 - ox, cursor.1 - oy), (CURSOR_SIZE, CURSOR_SIZE)),
+                Rectangle::new(Point::from((cursor.0 - ox, cursor.1 - oy)), Size::from((CURSOR_SIZE, CURSOR_SIZE))),
                 None,
                 1.0,
                 vec![
@@ -487,7 +481,7 @@ impl Gpu {
                     let sy = baseline - ICON_SIZE + 8;
                     shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
                         rounded.clone(),
-                        Rectangle::from_loc_and_size((sx, sy), (2, sh)),
+                        Rectangle::new(Point::from((sx, sy)), Size::from((2, sh))),
                         None,
                         1.0,
                         vec![
@@ -511,10 +505,7 @@ impl Gpu {
                 let y = baseline - size;
                 match dock_icons.get(i) {
                     Some(Some(tex)) => {
-                        let src = Rectangle::<f64, Logical>::from_loc_and_size(
-                            (0.0, 0.0),
-                            (ICON_TEX as f64, ICON_TEX as f64),
-                        );
+                        let src = Rectangle::<f64, Logical>::new(Point::from((0.0, 0.0)), Size::from((ICON_TEX as f64, ICON_TEX as f64)));
                         shot_elements.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
                             Point::from((x as f64, y as f64)),
                             tex,
@@ -527,7 +518,7 @@ impl Gpu {
                     _ => {
                         shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
                             rounded.clone(),
-                            Rectangle::from_loc_and_size((x, y), (size, size)),
+                            Rectangle::new(Point::from((x, y)), Size::from((size, size))),
                             None,
                             1.0,
                             vec![
@@ -542,7 +533,7 @@ impl Gpu {
             }
             shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
                 bordered.clone(),
-                Rectangle::from_loc_and_size((dock_x, dock_y), (dw, DOCK_H)),
+                Rectangle::new(Point::from((dock_x, dock_y)), Size::from((dw, DOCK_H))),
                 None,
                 1.0,
                 vec![
@@ -562,7 +553,7 @@ impl Gpu {
                 let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
                 let mut fb = renderer.bind(&mut shot_tex)?;
                 tracker.render_output(renderer, &mut fb, 0, &shot_elements, Color32F::from(CLEAR))?;
-                let region = Rectangle::from_loc_and_size((0, 0), (w, h));
+                let region = Rectangle::new(Point::from((0, 0)), Size::from((w, h)));
                 let mapping = renderer.copy_framebuffer(&fb, region, Fourcc::Abgr8888)?;
                 let bytes = renderer.map_texture(&mapping)?;
                 image::save_buffer(
