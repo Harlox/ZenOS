@@ -28,12 +28,12 @@ use smithay::reexports::input::Libinput;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
-use smithay::backend::renderer::gles::element::PixelShaderElement;
+use smithay::backend::renderer::gles::element::{PixelShaderElement, TextureShaderElement};
 use smithay::desktop::{Space, Window};
 use smithay::render_elements;
 use smithay::utils::{Scale, Transform};
 use smithay::backend::renderer::gles::{
-    GlesPixelProgram, GlesRenderer, GlesTexture, Uniform, UniformName, UniformType,
+    GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName, UniformType,
 };
 use smithay::backend::renderer::Color32F;
 use smithay::backend::session::libseat::LibSeatSession;
@@ -47,7 +47,7 @@ use smithay::reexports::drm::control::{connector, crtc, Device as _, Mode as Drm
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
-use smithay::utils::{DeviceFd, Logical, Point, Rectangle, SERIAL_COUNTER};
+use smithay::utils::{DeviceFd, Logical, Point, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::socket::ListeningSocketSource;
@@ -154,6 +154,53 @@ void main() {
 }
 "#;
 
+/// Backdrop blur factor: the wallpaper is pre-blurred at 1/N resolution on the
+/// CPU, then sampled (upscaled) under the dock. Bigger = blurrier + cheaper.
+const BLUR_DOWNSCALE: i32 = 4;
+const BLUR_SIGMA: f32 = 6.0;
+
+/// Texture shader: samples the (pre-blurred) wallpaper and masks it to a rounded
+/// rect. Used to draw the frosted backdrop behind the dock. Must mirror
+/// smithay's builtin texture shader structure (`//_DEFINES_`, EXTERNAL/NO_ALPHA).
+const BLUR_MASK_SHADER: &str = r#"#version 100
+//_DEFINES_
+#if defined(EXTERNAL)
+#extension GL_OES_EGL_image_external : require
+#endif
+#extension GL_OES_standard_derivatives : enable
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+#if defined(EXTERNAL)
+uniform samplerExternalOES tex;
+#else
+uniform sampler2D tex;
+#endif
+uniform float alpha;
+varying vec2 v_coords;
+uniform float u_radius;
+uniform vec2 u_size;
+
+float sd_rounded_box(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+}
+
+void main() {
+    vec4 c = texture2D(tex, v_coords);
+#if defined(NO_ALPHA)
+    c = vec4(c.rgb, 1.0);
+#endif
+    vec2 p = v_coords * u_size - u_size * 0.5;
+    float d = sd_rounded_box(p, u_size * 0.5, u_radius);
+    float cov = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
+    float a = cov * alpha;
+    gl_FragColor = vec4(c.rgb * a, a);
+}
+"#;
+
 /// Rounded box with a highlight border (inner stroke) — for the macOS-style
 /// dock: translucent body + a bright 1px rim.
 const BORDERED_SHADER: &str = r#"
@@ -230,8 +277,10 @@ render_elements! {
     pub ZenElement<=GlesRenderer>;
     Window = WaylandSurfaceRenderElement<GlesRenderer>,
     Ui = PixelShaderElement,
-    // Any GLES texture: wallpaper + text glyphs.
+    // Any GLES texture: wallpaper + text glyphs + dock icons.
     Texture = TextureRenderElement<GlesTexture>,
+    // Texture sampled through a custom shader (frosted dock backdrop).
+    Blur = TextureShaderElement,
 }
 
 // Text styling.
@@ -255,6 +304,8 @@ pub struct Surface {
     pub pending_flip: bool,
     /// Fullscreen wallpaper, pre-scaled to this output. None = flat CLEAR bg.
     pub wallpaper: Option<TextureBuffer<GlesTexture>>,
+    /// Pre-blurred wallpaper at 1/BLUR_DOWNSCALE res, for the dock backdrop.
+    pub wallpaper_blur: Option<TextureBuffer<GlesTexture>>,
 }
 
 /// One GPU: the DRM device, GBM allocator, GLES renderer, shaders, and one
@@ -271,6 +322,8 @@ pub struct Gpu {
     pub rounded_top: GlesPixelProgram,
     /// Rounded-rect-with-border shader, for the dock.
     pub bordered: GlesPixelProgram,
+    /// Texture shader: rounded-masked sampling of the blurred wallpaper.
+    pub blur_mask: GlesTexProgram,
     /// Dock app icons (device-level, loaded once), one per DOCK_APPS entry.
     /// None = icon file missing -> a placeholder square is drawn.
     pub dock_icons: Vec<Option<TextureBuffer<GlesTexture>>>,
@@ -319,6 +372,7 @@ impl Gpu {
             rounded,
             rounded_top,
             bordered,
+            blur_mask,
             dock_icons,
             surfaces,
             text,
@@ -426,6 +480,33 @@ impl Gpu {
         }
 
         elements.push(ZenElement::Ui(dock));
+
+        // Frosted backdrop: blurred wallpaper under the dock, rounded-masked.
+        // Behind the translucent dock tint, in front of windows/wallpaper.
+        if let Some(blur) = &surface.wallpaper_blur {
+            let bd = BLUR_DOWNSCALE as f64;
+            let src = Rectangle::<f64, Logical>::from_loc_and_size(
+                (dock_x as f64 / bd, dock_y as f64 / bd),
+                (DOCK_W as f64 / bd, DOCK_H as f64 / bd),
+            );
+            let inner = TextureRenderElement::from_texture_buffer(
+                Point::from((dock_x as f64, dock_y as f64)),
+                blur,
+                None,
+                Some(src),
+                Some(Size::from((DOCK_W, DOCK_H))),
+                Kind::Unspecified,
+            );
+            let backdrop = TextureShaderElement::new(
+                inner,
+                blur_mask.clone(),
+                vec![
+                    Uniform::new("u_radius", DOCK_RADIUS),
+                    Uniform::new("u_size", [DOCK_W as f32, DOCK_H as f32]),
+                ],
+            );
+            elements.push(ZenElement::Blur(backdrop));
+        }
         let scale = Scale::from(1.0);
         for window in space.elements() {
             let g = space.element_location(window).unwrap_or_default();
@@ -976,6 +1057,15 @@ fn open_device(
         ],
     )?;
 
+    // Frosted-backdrop texture shader (samples blurred wallpaper, rounded mask).
+    let blur_mask = renderer.compile_custom_texture_shader(
+        BLUR_MASK_SHADER,
+        &[
+            UniformName::new("u_radius", UniformType::_1f),
+            UniformName::new("u_size", UniformType::_2f),
+        ],
+    )?;
+
     // Dock icons (load once at device open).
     let dock_icons = DOCK_APPS
         .iter()
@@ -992,6 +1082,7 @@ fn open_device(
             rounded,
             rounded_top,
             bordered,
+            blur_mask,
             dock_icons,
             surfaces: HashMap::new(),
             frames: 0,
@@ -1122,6 +1213,7 @@ fn create_surface(
 
     let size = (mode.size().0 as i32, mode.size().1 as i32);
     let wallpaper = load_wallpaper(&mut gpu.renderer, size.0, size.1);
+    let wallpaper_blur = load_wallpaper_blur(&mut gpu.renderer, size.0, size.1);
     let global = output.create_global::<ZenState>(dh);
 
     tracing::info!(
@@ -1142,6 +1234,7 @@ fn create_surface(
             location: (0, 0),
             pending_flip: false,
             wallpaper,
+            wallpaper_blur,
         },
     );
     Ok(())
@@ -1279,4 +1372,32 @@ fn load_wallpaper(
             None
         }
     }
+}
+
+/// Load + heavily blur the wallpaper at 1/BLUR_DOWNSCALE resolution, for the
+/// dock's frosted backdrop. Downscaling first makes the blur cheap and stronger.
+fn load_wallpaper_blur(
+    renderer: &mut GlesRenderer,
+    w: i32,
+    h: i32,
+) -> Option<TextureBuffer<GlesTexture>> {
+    let path = std::env::var("ZENOS_WALLPAPER")
+        .unwrap_or_else(|_| "/usr/local/share/zenos/wallpaper.png".to_string());
+    let img = image::open(&path).ok()?;
+    let bw = (w / BLUR_DOWNSCALE).max(1);
+    let bh = (h / BLUR_DOWNSCALE).max(1);
+    let small = img.resize_to_fill(bw as u32, bh as u32, image::imageops::FilterType::Triangle);
+    let blurred = small.blur(BLUR_SIGMA);
+    let rgba = blurred.to_rgba8();
+    TextureBuffer::from_memory(
+        renderer,
+        rgba.as_raw(),
+        Fourcc::Abgr8888,
+        (bw, bh),
+        false,
+        1,
+        Transform::Normal,
+        None,
+    )
+    .ok()
 }
