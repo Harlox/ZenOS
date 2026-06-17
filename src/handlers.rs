@@ -10,8 +10,10 @@ use smithay::reexports::wayland_server::Client;
 use smithay::utils::Serial;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    get_parent, is_sync_subsurface, CompositorClientState, CompositorHandler, CompositorState,
+    get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
+    CompositorState,
 };
+use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -48,8 +50,25 @@ impl CompositorHandler for ZenState {
                 .space
                 .elements()
                 .find(|w| w.toplevel().map(|t| t.wl_surface() == &root).unwrap_or(false))
+                .cloned()
             {
                 window.on_commit();
+                // Send the initial configure once, so the client attaches a
+                // buffer and actually draws.
+                if let Some(toplevel) = window.toplevel() {
+                    let initial_sent = with_states(surface, |states| {
+                        states
+                            .data_map
+                            .get::<XdgToplevelSurfaceData>()
+                            .unwrap()
+                            .lock()
+                            .unwrap()
+                            .initial_configure_sent
+                    });
+                    if !initial_sent {
+                        toplevel.send_configure();
+                    }
+                }
             }
         }
         self.popups.commit(surface);
