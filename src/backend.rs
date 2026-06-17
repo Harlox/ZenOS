@@ -894,8 +894,10 @@ fn create_surface(
 
 /// Position outputs left-to-right (stable order by CRTC) in the global Space.
 fn relayout_outputs(gpu: &mut Gpu, space: &mut Space<Window>) {
+    // crtc::Handle isn't Ord; order by output name for a stable left-to-right
+    // layout (e.g. eDP-* then HDMI-A-*).
     let mut crtcs: Vec<crtc::Handle> = gpu.surfaces.keys().copied().collect();
-    crtcs.sort();
+    crtcs.sort_by_key(|c| gpu.surfaces[c].output.name());
     let mut x = 0;
     for crtc in crtcs {
         if let Some(s) = gpu.surfaces.get_mut(&crtc) {
