@@ -399,10 +399,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --- Step 2: udev (GPU discovery) ---------------------------------------
     let udev_backend = UdevBackend::new(&seat_name)?;
 
-    let primary = primary_gpu(&seat_name)
+    // $ZENOS_GPU forces a specific DRM node (e.g. /dev/dri/card0). On hybrid
+    // laptops the external HDMI/DP is often wired to the dGPU, while the iGPU
+    // only sees it in degraded modes; pick the GPU the display hangs off.
+    let primary = std::env::var("ZENOS_GPU")
         .ok()
-        .flatten()
         .and_then(|p| DrmNode::from_path(p).ok())
+        .or_else(|| {
+            primary_gpu(&seat_name)
+                .ok()
+                .flatten()
+                .and_then(|p| DrmNode::from_path(p).ok())
+        })
         .or_else(|| {
             all_gpus(&seat_name)
                 .ok()?
