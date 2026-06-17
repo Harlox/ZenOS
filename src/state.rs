@@ -97,12 +97,13 @@ impl ZenState {
     }
 
     /// Render the current frame via the GPU (split borrows: gpu + space).
-    /// Skips if a flip is already pending; only marks pending when one is queued.
+    /// Skips if a flip is already pending; only marks pending when one is
+    /// queued (i.e. there was damage). Does NOT send frame callbacks — those
+    /// go out on VBlank so clients are throttled to the monitor refresh.
     pub fn render(&mut self) {
         let Self {
             gpu,
             space,
-            start_time,
             pointer_location,
             ..
         } = self;
@@ -116,13 +117,17 @@ impl ZenState {
                 Err(e) => tracing::error!("render failed: {e}"),
             }
         }
+    }
 
-        // Frame callbacks: tell clients (e.g. foot) they may draw the next
-        // frame. Without this they draw once and never update (typed text,
-        // cursor blink, etc. never appear).
-        let now = start_time.elapsed();
+    /// Tell clients they may draw the next frame. Called once per VBlank, so a
+    /// client (e.g. foot) is paced to the monitor's refresh rate (60/120/165Hz)
+    /// instead of spinning as fast as the event loop. Without this, clients
+    /// draw once and never update (typed text, cursor blink, etc.).
+    pub fn send_frame_callbacks(&mut self) {
+        let Some(gpu) = &self.gpu else { return };
+        let now = self.start_time.elapsed();
         let output = gpu.output.clone();
-        for w in space.elements() {
+        for w in self.space.elements() {
             w.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()));
         }
     }

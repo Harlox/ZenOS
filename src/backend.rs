@@ -44,7 +44,8 @@ use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
-use smithay::reexports::calloop::EventLoop;
+use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::{EventLoop, Interest, Mode as CalloopMode, PostAction};
 use smithay::reexports::drm::control::{connector, Device as _};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::Display;
@@ -345,6 +346,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("WAYLAND_DISPLAY", &socket_name);
     tracing::info!("WAYLAND_DISPLAY={socket_name}");
 
+    // Wake the event loop when a client sends a request, so the loop can block
+    // on events (no busy-poll) yet still service clients promptly. The actual
+    // dispatch_clients + flush happen in the main loop; this source only needs
+    // to make `dispatch` return. Level-triggered: readiness is cleared when the
+    // main loop reads the fd via dispatch_clients on the next iteration.
+    let display_fd = display.backend().poll_fd().try_clone_to_owned()?;
+    handle.insert_source(
+        Generic::new(display_fd, Interest::READ, CalloopMode::Level),
+        |_, _, _: &mut ZenState| Ok(PostAction::Continue),
+    )?;
+
     // --- Step 2: udev (GPU discovery) ---------------------------------------
     let udev_backend = UdevBackend::new(&seat_name)?;
 
@@ -408,14 +420,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     state.space.map_output(&gpu.output, (0, 0));
     state.gpu = Some(gpu);
 
-    // DRM VBlank: ack the completed flip, then render + queue the next frame.
-    // This is what keeps the screen updating (so client windows appear).
+    // DRM VBlank: the heartbeat. Ack the completed flip, release clients to draw
+    // their next frame (throttled to the monitor refresh), then render again so
+    // any damage that landed during the flip is shown and the flip chain keeps
+    // running. At max refresh the chain is: render -> flip -> vblank -> render.
     handle.insert_source(drm_notifier, move |event, _, data| match event {
         DrmEvent::VBlank(_crtc) => {
             if let Some(gpu) = &mut data.gpu {
                 let _ = gpu.compositor.frame_submitted();
                 gpu.pending_flip = false;
             }
+            data.send_frame_callbacks();
+            data.render();
         }
         DrmEvent::Error(e) => tracing::error!("DRM error: {e:?}"),
     })?;
@@ -593,14 +609,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Dispatch loop -------------------------------------------------------
-    // Single static frame for now; just service events (vblank, session) and
-    // honor the auto-exit deadline. Continuous redraw comes with the UI port.
+    // Event-driven: block until something happens (input, client request, or a
+    // VBlank), then service it and try to render. Rendering itself is gated by
+    // pending_flip + damage, and the VBlank handler keeps the flip chain going,
+    // so the effective frame rate tracks the monitor's refresh (60/120/165Hz)
+    // with no busy-spin when idle. Only poll on a timer when an auto-exit
+    // deadline is set, so it can still fire with no events.
+    let tick = deadline.map(|_| Duration::from_millis(200));
     tracing::info!("ZenOS compositor running");
     while state.running {
-        event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
+        event_loop.dispatch(tick, &mut state)?;
 
-        // Service Wayland clients, refresh layout, then render (queues a flip
-        // only if there is damage and none is pending).
         display.dispatch_clients(&mut state)?;
         state.space.refresh();
         state.render();
@@ -670,12 +689,23 @@ fn open_gpu(
         .filter_map(|h| drm.get_connector(*h, false).ok())
         .find(|c| c.state() == connector::State::Connected)
         .ok_or("no connected connector")?;
-    let mode = *conn.modes().first().ok_or("connector has no modes")?;
+    // Pick the highest refresh at the largest resolution (tie-break on Hz), so
+    // a 120/165Hz panel runs at full rate instead of whatever DRM lists first.
+    let mode = conn
+        .modes()
+        .iter()
+        .copied()
+        .max_by_key(|m| {
+            let (w, h) = m.size();
+            (w as u64 * h as u64, m.vrefresh())
+        })
+        .ok_or("connector has no modes")?;
     tracing::info!(
-        "connector {:?}, mode {}x{}",
+        "connector {:?}, mode {}x{}@{}Hz",
         conn.interface(),
         mode.size().0,
-        mode.size().1
+        mode.size().1,
+        mode.vrefresh()
     );
 
     // --- find a CRTC drivable by this connector's encoders ------------------
