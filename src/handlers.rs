@@ -146,6 +146,7 @@ impl XdgShellHandler for ZenState {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let wl = surface.wl_surface();
         self.placed.remove(wl);
+        self.maximized.remove(wl);
         let window = self
             .space
             .elements()

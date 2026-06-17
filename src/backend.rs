@@ -32,7 +32,7 @@ use smithay::wayland::socket::ListeningSocketSource;
 
 use std::sync::Arc;
 
-use crate::state::{ClientState, MoveGrab};
+use crate::state::{ClientState, MoveGrab, ResizeGrab};
 
 use crate::state::ZenState;
 
@@ -232,7 +232,40 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             loc.y = (loc.y + event.delta_y()).clamp(0.0, maxh as f64);
             data.pointer_location = loc;
 
-            if let Some(grab) = &data.move_grab {
+            if let Some(grab) = &data.resize_grab {
+                let dx = (loc.x - grab.start_ptr.x) as i32;
+                let dy = (loc.y - grab.start_ptr.y) as i32;
+                let (sw, sh) = grab.start_size;
+                let (sx, sy) = (grab.start_loc.x, grab.start_loc.y);
+                let (gl, gr, gt, gb) = (grab.left, grab.right, grab.top, grab.bottom);
+                let window = grab.window.clone();
+                let mut nw = sw;
+                let mut nh = sh;
+                if gr {
+                    nw = sw + dx;
+                }
+                if gl {
+                    nw = sw - dx;
+                }
+                if gb {
+                    nh = sh + dy;
+                }
+                if gt {
+                    nh = sh - dy;
+                }
+                nw = nw.max(WIN_MIN_W);
+                nh = nh.max(WIN_MIN_H);
+                // When dragging the left/top edge the origin moves with it, but
+                // stops once the window hits its minimum size.
+                let nx = if gl { sx + (sw - nw) } else { sx };
+                let ny = if gt { sy + (sh - nh) } else { sy };
+                if let Some(t) = window.toplevel() {
+                    t.with_pending_state(|s| s.size = Some((nw, nh).into()));
+                    t.send_configure();
+                }
+                data.space.map_element(window, (nx, ny), false);
+                data.dirty = true;
+            } else if let Some(grab) = &data.move_grab {
                 let dx = (loc.x - grab.start_ptr.x) as i32;
                 let dy = (loc.y - grab.start_ptr.y) as i32;
                 let new = (grab.start_win.x + dx, grab.start_win.y + dy);
@@ -338,10 +371,47 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         Point::from((wl.x + LIGHT_MARGIN, wl.y - TITLEBAR_H + (TITLEBAR_H - LIGHT_DIA) / 2)),
                         Size::from((LIGHT_DIA, LIGHT_DIA)),
                     );
+                    // Third traffic light = maximize / restore.
+                    let max_btn = Rectangle::new(
+                        Point::from((
+                            wl.x + LIGHT_MARGIN + 2 * LIGHT_SPACING,
+                            wl.y - TITLEBAR_H + (TITLEBAR_H - LIGHT_DIA) / 2,
+                        )),
+                        Size::from((LIGHT_DIA, LIGHT_DIA)),
+                    );
                     if button == BTN_LEFT && close.to_f64().contains(loc) {
                         if let Some(t) = window.toplevel() {
                             t.send_close();
                         }
+                    } else if button == BTN_LEFT && max_btn.to_f64().contains(loc) {
+                        // Toggle maximize: restore saved geometry, or fill the
+                        // output below the bar + titlebar and remember the old one.
+                        if let Some(t) = window.toplevel() {
+                            let surf = t.wl_surface().clone();
+                            if let Some(((rx, ry), (rw, rh))) = data.maximized.remove(&surf) {
+                                t.with_pending_state(|s| s.size = Some((rw, rh).into()));
+                                t.send_configure();
+                                data.space.map_element(window.clone(), (rx, ry), false);
+                            } else if let Some(geo) = data
+                                .space
+                                .outputs()
+                                .next()
+                                .and_then(|o| data.space.output_geometry(o))
+                            {
+                                let cur = window.geometry().size;
+                                data.maximized.insert(surf, ((wl.x, wl.y), (cur.w, cur.h)));
+                                let mw = geo.size.w;
+                                let mh = geo.size.h - BAR_H - TITLEBAR_H;
+                                t.with_pending_state(|s| s.size = Some((mw, mh).into()));
+                                t.send_configure();
+                                data.space.map_element(
+                                    window.clone(),
+                                    (geo.loc.x, geo.loc.y + BAR_H + TITLEBAR_H),
+                                    false,
+                                );
+                            }
+                        }
+                        data.dirty = true;
                     } else if button == BTN_LEFT {
                         // Drag the titlebar to move (no modifier, macOS-style).
                         data.move_grab = Some(MoveGrab {
@@ -374,9 +444,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Bring the clicked window to the front of the stack.
                     data.space.raise_element(&window, true);
+                    // Click within the edge band starts an interactive resize.
+                    if button == BTN_LEFT {
+                        let wl_loc = data.space.element_location(&window).unwrap_or_default();
+                        let gs = window.geometry().size;
+                        let rx = loc.x as i32 - wl_loc.x;
+                        let ry = loc.y as i32 - wl_loc.y;
+                        let left = rx <= RESIZE_BORDER;
+                        let right = rx >= gs.w - RESIZE_BORDER;
+                        let top = ry <= RESIZE_BORDER;
+                        let bottom = ry >= gs.h - RESIZE_BORDER;
+                        if left || right || top || bottom {
+                            data.resize_grab = Some(ResizeGrab {
+                                window: window.clone(),
+                                start_ptr: loc,
+                                start_loc: wl_loc,
+                                start_size: (gs.w, gs.h),
+                                left,
+                                right,
+                                top,
+                                bottom,
+                            });
+                        }
+                    }
                 }
             } else {
                 data.move_grab = None;
+                data.resize_grab = None;
             }
             let pointer = data.seat.get_pointer().unwrap();
             pointer.button(

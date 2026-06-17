@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use smithay::desktop::{PopupManager, Space, Window};
@@ -60,9 +60,13 @@ pub struct ZenState {
     pub pointer_location: Point<f64, Logical>,
     /// Active interactive move (Super+drag): window + pointer/window start.
     pub move_grab: Option<MoveGrab>,
+    /// Active interactive resize (drag a window edge/corner).
+    pub resize_grab: Option<ResizeGrab>,
     /// Toplevels already centered once (on their first sized commit), so the
     /// user's later moves aren't yanked back to center.
     pub placed: HashSet<WlSurface>,
+    /// Maximized windows -> their pre-maximize (loc, size), for restore.
+    pub maximized: HashMap<WlSurface, ((i32, i32), (i32, i32))>,
 }
 
 /// Tracks an interactive window move.
@@ -70,6 +74,19 @@ pub struct MoveGrab {
     pub window: Window,
     pub start_ptr: Point<f64, Logical>,
     pub start_win: Point<i32, Logical>,
+}
+
+/// Tracks an interactive window resize: which edges are dragged + the window's
+/// geometry when the grab started.
+pub struct ResizeGrab {
+    pub window: Window,
+    pub start_ptr: Point<f64, Logical>,
+    pub start_loc: Point<i32, Logical>,
+    pub start_size: (i32, i32),
+    pub left: bool,
+    pub right: bool,
+    pub top: bool,
+    pub bottom: bool,
 }
 
 impl ZenState {
@@ -112,7 +129,9 @@ impl ZenState {
             seat,
             pointer_location: (0.0, 0.0).into(),
             move_grab: None,
+            resize_grab: None,
             placed: HashSet::new(),
+            maximized: HashMap::new(),
         }
     }
 

@@ -34,6 +34,13 @@ pub const MAG_RADIUS: f32 = 110.0;
 /// Icon corner radius as a fraction of icon size (squircle-ish mask).
 pub const ICON_RADIUS_FRAC: f32 = 0.23;
 
+// --- Window manipulation ------------------------------------------------
+/// Grab band (px) inside a window's edges that starts an interactive resize.
+pub const RESIZE_BORDER: i32 = 8;
+/// Minimum interactive size, so a window can't be shrunk to nothing.
+pub const WIN_MIN_W: i32 = 120;
+pub const WIN_MIN_H: i32 = 80;
+
 // --- Radii / cursor -----------------------------------------------------
 pub const BAR_RADIUS: f32 = 0.0;
 pub const DOCK_RADIUS: f32 = 20.0;
