@@ -825,7 +825,7 @@ impl Gpu {
         // it (clean, unlike a phone photo). Rare path; ignore on error.
         if shot {
             let mut capture = || -> Result<(), Box<dyn std::error::Error>> {
-                let mut shot_tex =
+                let mut shot_tex: GlesTexture =
                     renderer.create_buffer(Fourcc::Abgr8888, Size::from((w, h)))?;
                 let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
                 let mut fb = renderer.bind(&mut shot_tex)?;
