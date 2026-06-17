@@ -330,6 +330,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let keyboard = data.seat.get_keyboard().unwrap();
                         keyboard.set_focus(data, Some(s), serial);
                     }
+                    // Bring the clicked window to the front of the stack.
+                    data.space.raise_element(&window, true);
                     // First traffic light = close.
                     let close = Rectangle::new(
                         Point::from((wl.x + LIGHT_MARGIN, wl.y - TITLEBAR_H + (TITLEBAR_H - LIGHT_DIA) / 2)),
@@ -369,6 +371,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let keyboard = data.seat.get_keyboard().unwrap();
                         keyboard.set_focus(data, Some(s), serial);
                     }
+                    // Bring the clicked window to the front of the stack.
+                    data.space.raise_element(&window, true);
                 }
             } else {
                 data.move_grab = None;

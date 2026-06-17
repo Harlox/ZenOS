@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use smithay::desktop::{PopupManager, Space, Window};
 use smithay::input::{Seat, SeatState};
 use smithay::reexports::calloop::LoopSignal;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Logical, Point};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState};
@@ -58,6 +60,9 @@ pub struct ZenState {
     pub pointer_location: Point<f64, Logical>,
     /// Active interactive move (Super+drag): window + pointer/window start.
     pub move_grab: Option<MoveGrab>,
+    /// Toplevels already centered once (on their first sized commit), so the
+    /// user's later moves aren't yanked back to center.
+    pub placed: HashSet<WlSurface>,
 }
 
 /// Tracks an interactive window move.
@@ -107,6 +112,7 @@ impl ZenState {
             seat,
             pointer_location: (0.0, 0.0).into(),
             move_grab: None,
+            placed: HashSet::new(),
         }
     }
 

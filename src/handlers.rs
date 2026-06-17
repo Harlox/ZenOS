@@ -31,6 +31,7 @@ use smithay::{
 };
 
 use crate::state::{ClientState, ZenState};
+use crate::config::{BAR_H, TITLEBAR_H};
 
 impl CompositorHandler for ZenState {
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -57,6 +58,25 @@ impl CompositorHandler for ZenState {
                 .cloned();
             if let Some(window) = window {
                 window.on_commit();
+                // Center the window once, on its first sized commit; after that
+                // the user owns its position (don't yank it back to center).
+                let geo = window.geometry().size;
+                if geo.w > 0 && geo.h > 0 && self.placed.insert(root.clone()) {
+                    let center = self
+                        .space
+                        .outputs()
+                        .next()
+                        .and_then(|o| self.space.output_geometry(o))
+                        .map(|og| {
+                            let x = og.loc.x + (og.size.w - geo.w).max(0) / 2;
+                            let y = (og.loc.y + (og.size.h - geo.h).max(0) / 2)
+                                .max(og.loc.y + BAR_H + TITLEBAR_H);
+                            (x, y)
+                        });
+                    if let Some(pos) = center {
+                        self.space.map_element(window.clone(), pos, false);
+                    }
+                }
                 // Send the initial configure once, so the client attaches a
                 // buffer and actually draws.
                 if let Some(toplevel) = window.toplevel() {
@@ -120,6 +140,20 @@ impl XdgShellHandler for ZenState {
         self.space.map_element(window, (60, 80), false);
         self.dirty = true;
         // Keyboard focus is set on commit (once the client is ready), not here.
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let wl = surface.wl_surface();
+        self.placed.remove(wl);
+        if let Some(window) = self
+            .space
+            .elements()
+            .find(|w| w.toplevel().map(|t| t.wl_surface() == wl).unwrap_or(false))
+            .cloned()
+        {
+            self.space.unmap_elem(&window);
+        }
+        self.dirty = true;
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
