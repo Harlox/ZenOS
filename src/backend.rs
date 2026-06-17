@@ -87,10 +87,11 @@ fn dock_width(n: usize) -> i32 {
 }
 
 /// A dock entry: the binary to spawn on click + candidate icon paths (first that
-/// exists wins; none -> placeholder square).
+/// exists wins; none -> a colored placeholder square using `placeholder`).
 struct DockApp {
     exec: &'static str,
     icons: &'static [&'static str],
+    placeholder: [f32; 4],
 }
 const DOCK_APPS: &[DockApp] = &[
     DockApp {
@@ -99,13 +100,42 @@ const DOCK_APPS: &[DockApp] = &[
             "/usr/share/icons/hicolor/48x48/apps/foot.png",
             "/usr/share/icons/hicolor/256x256/apps/foot.png",
         ],
+        placeholder: [0.20, 0.22, 0.28, 0.85],
     },
     DockApp {
         exec: "firefox",
-        icons: &[
-            "/usr/share/icons/hicolor/48x48/apps/firefox.png",
-            "/usr/share/icons/hicolor/128x128/apps/firefox.png",
-        ],
+        icons: &["/usr/share/icons/hicolor/48x48/apps/firefox.png"],
+        placeholder: [0.95, 0.45, 0.15, 0.9], // orange
+    },
+    DockApp {
+        exec: "files",
+        icons: &["/usr/share/icons/hicolor/48x48/apps/org.gnome.Nautilus.png"],
+        placeholder: [0.20, 0.55, 0.95, 0.9], // blue
+    },
+    DockApp {
+        exec: "code",
+        icons: &["/usr/share/icons/hicolor/48x48/apps/code.png"],
+        placeholder: [0.15, 0.50, 0.75, 0.9], // teal-blue
+    },
+    DockApp {
+        exec: "thunderbird",
+        icons: &["/usr/share/icons/hicolor/48x48/apps/thunderbird.png"],
+        placeholder: [0.30, 0.70, 0.95, 0.9], // sky
+    },
+    DockApp {
+        exec: "spotify",
+        icons: &["/usr/share/icons/hicolor/48x48/apps/spotify.png"],
+        placeholder: [0.20, 0.80, 0.40, 0.9], // green
+    },
+    DockApp {
+        exec: "gimp",
+        icons: &["/usr/share/icons/hicolor/48x48/apps/gimp.png"],
+        placeholder: [0.65, 0.45, 0.30, 0.9], // brown
+    },
+    DockApp {
+        exec: "blender",
+        icons: &["/usr/share/icons/hicolor/48x48/apps/blender.png"],
+        placeholder: [0.95, 0.55, 0.20, 0.9], // amber
     },
 ];
 /// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
@@ -460,7 +490,7 @@ impl Gpu {
         elements.push(ZenElement::Ui(bar));
 
         // Dock app icons (in front of the dock background, pushed before it).
-        for (i, _app) in DOCK_APPS.iter().enumerate() {
+        for (i, app) in DOCK_APPS.iter().enumerate() {
             let (ix, iy) = dock_icon_pos(w, h, i, DOCK_APPS.len());
             match dock_icons.get(i) {
                 Some(Some(tex)) => {
@@ -474,14 +504,14 @@ impl Gpu {
                     )));
                 }
                 _ => {
-                    // Placeholder rounded square when the icon file is missing.
+                    // Colored rounded-square placeholder when the icon is missing.
                     elements.push(ZenElement::Ui(PixelShaderElement::new(
                         rounded.clone(),
                         Rectangle::from_loc_and_size((ix, iy), (ICON_SIZE, ICON_SIZE)),
                         None,
                         1.0,
                         vec![
-                            Uniform::new("u_color", [0.55f32, 0.58, 0.66, 0.55]),
+                            Uniform::new("u_color", app.placeholder),
                             Uniform::new("u_radius", 11.0f32),
                             Uniform::new("u_size", [ICON_SIZE as f32, ICON_SIZE as f32]),
                         ],
