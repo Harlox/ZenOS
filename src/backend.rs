@@ -64,16 +64,27 @@ use crate::state::ZenState;
 const CLEAR: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
 // Slightly translucent UI (fake glass; true backdrop blur is a later pass).
 const BAR_COLOR: [f32; 4] = [0.16, 0.16, 0.18, 0.70];
-// macOS-style dock: light frosted body + bright rim highlight.
-const DOCK_COLOR: [f32; 4] = [0.82, 0.83, 0.88, 0.32];
-const DOCK_BORDER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.45];
-const DOCK_BORDER_W: f32 = 1.5;
+// macOS-style dock: neutral frosted body (low alpha so the blur shows through,
+// not a washed tint) + a faint bright rim.
+const DOCK_COLOR: [f32; 4] = [0.90, 0.91, 0.94, 0.18];
+const DOCK_BORDER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
+const DOCK_BORDER_W: f32 = 1.0;
 const BAR_H: i32 = 30;
-const DOCK_W: i32 = 500;
-const DOCK_H: i32 = 65;
-const DOCK_MARGIN: i32 = 15;
+const DOCK_H: i32 = 64;
+const DOCK_MARGIN: i32 = 14; // gap from the bottom of the screen
 const ICON_SIZE: i32 = 48;
-const ICON_GAP: i32 = 18;
+const ICON_GAP: i32 = 12;
+const DOCK_PAD_X: i32 = 14; // dock side padding (left of first icon)
+const DOCK_PAD_Y: i32 = (DOCK_H - ICON_SIZE) / 2;
+
+/// Dock width hugs its content (macOS-style), not a fixed bar.
+fn dock_width(n: usize) -> i32 {
+    let n = n as i32;
+    if n == 0 {
+        return 2 * DOCK_PAD_X;
+    }
+    2 * DOCK_PAD_X + n * ICON_SIZE + (n - 1) * ICON_GAP
+}
 
 /// A dock entry: the binary to spawn on click + candidate icon paths (first that
 /// exists wins; none -> placeholder square).
@@ -101,7 +112,7 @@ const DOCK_APPS: &[DockApp] = &[
 const KEY_ESC: u32 = 9; // evdev KEY_ESC 1 -> quit
 const KEY_F1: u32 = 67; // evdev KEY_F1 59 -> spawn a terminal (Enter stays free)
 const BAR_RADIUS: f32 = 0.0;
-const DOCK_RADIUS: f32 = 22.0;
+const DOCK_RADIUS: f32 = 20.0;
 const CURSOR_SIZE: i32 = 12;
 const CURSOR_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
 /// Left mouse button (evdev BTN_LEFT).
@@ -157,7 +168,7 @@ void main() {
 /// Backdrop blur factor: the wallpaper is pre-blurred at 1/N resolution on the
 /// CPU, then sampled (upscaled) under the dock. Bigger = blurrier + cheaper.
 const BLUR_DOWNSCALE: i32 = 4;
-const BLUR_SIGMA: f32 = 6.0;
+const BLUR_SIGMA: f32 = 10.0;
 
 /// Texture shader: samples the (pre-blurred) wallpaper and masks it to a rounded
 /// rect. Used to draw the frosted backdrop behind the dock. Must mirror
@@ -387,7 +398,8 @@ impl Gpu {
         let (w, h) = surface.size;
         let (ox, oy) = surface.location;
 
-        let dock_x = (w - DOCK_W) / 2;
+        let dw = dock_width(DOCK_APPS.len());
+        let dock_x = (w - dw) / 2;
         let dock_y = h - DOCK_H - DOCK_MARGIN;
         let bar = PixelShaderElement::new(
             rounded.clone(),
@@ -403,7 +415,7 @@ impl Gpu {
         );
         let dock = PixelShaderElement::new(
             bordered.clone(),
-            Rectangle::from_loc_and_size((dock_x, dock_y), (DOCK_W, DOCK_H)),
+            Rectangle::from_loc_and_size((dock_x, dock_y), (dw, DOCK_H)),
             None,
             1.0,
             vec![
@@ -411,7 +423,7 @@ impl Gpu {
                 Uniform::new("u_border_color", DOCK_BORDER_COLOR),
                 Uniform::new("u_border", DOCK_BORDER_W),
                 Uniform::new("u_radius", DOCK_RADIUS),
-                Uniform::new("u_size", [DOCK_W as f32, DOCK_H as f32]),
+                Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
             ],
             Kind::Unspecified,
         );
@@ -469,8 +481,8 @@ impl Gpu {
                         None,
                         1.0,
                         vec![
-                            Uniform::new("u_color", [0.45f32, 0.5, 0.6, 1.0]),
-                            Uniform::new("u_radius", 10.0f32),
+                            Uniform::new("u_color", [0.55f32, 0.58, 0.66, 0.55]),
+                            Uniform::new("u_radius", 11.0f32),
                             Uniform::new("u_size", [ICON_SIZE as f32, ICON_SIZE as f32]),
                         ],
                         Kind::Unspecified,
@@ -487,14 +499,14 @@ impl Gpu {
             let bd = BLUR_DOWNSCALE as f64;
             let src = Rectangle::<f64, Logical>::from_loc_and_size(
                 (dock_x as f64 / bd, dock_y as f64 / bd),
-                (DOCK_W as f64 / bd, DOCK_H as f64 / bd),
+                (dw as f64 / bd, DOCK_H as f64 / bd),
             );
             let inner = TextureRenderElement::from_texture_buffer(
                 Point::from((dock_x as f64, dock_y as f64)),
                 blur,
                 None,
                 Some(src),
-                Some(Size::from((DOCK_W, DOCK_H))),
+                Some(Size::from((dw, DOCK_H))),
                 Kind::Unspecified,
             );
             let backdrop = TextureShaderElement::new(
@@ -502,7 +514,7 @@ impl Gpu {
                 blur_mask.clone(),
                 vec![
                     Uniform::new("u_radius", DOCK_RADIUS),
-                    Uniform::new("u_size", [DOCK_W as f32, DOCK_H as f32]),
+                    Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
                 ],
             );
             elements.push(ZenElement::Blur(backdrop));
@@ -1292,15 +1304,13 @@ fn relayout_outputs(gpu: &mut Gpu, space: &mut Space<Window>) {
     }
 }
 
-/// Top-left (output-local) px of dock icon `i` of `n`, centered in the dock.
+/// Top-left (output-local) px of dock icon `i` of `n`.
 fn dock_icon_pos(w: i32, h: i32, i: usize, n: usize) -> (i32, i32) {
-    let n = n as i32;
-    let total = n * ICON_SIZE + (n - 1).max(0) * ICON_GAP;
-    let dock_x = (w - DOCK_W) / 2;
+    let dw = dock_width(n);
+    let dock_x = (w - dw) / 2;
     let dock_y = h - DOCK_H - DOCK_MARGIN;
-    let start_x = dock_x + (DOCK_W - total) / 2;
-    let x = start_x + i as i32 * (ICON_SIZE + ICON_GAP);
-    let y = dock_y + (DOCK_H - ICON_SIZE) / 2;
+    let x = dock_x + DOCK_PAD_X + i as i32 * (ICON_SIZE + ICON_GAP);
+    let y = dock_y + DOCK_PAD_Y;
     (x, y)
 }
 
