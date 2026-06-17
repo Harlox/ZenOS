@@ -59,8 +59,9 @@ const BAR_H: i32 = 30;
 const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
 const DOCK_MARGIN: i32 = 15;
-/// xkb keycode for Esc (evdev KEY_ESC 1 + 8). smithay's Keycode is xkb-space.
-const KEY_ESC: u32 = 9;
+/// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
+const KEY_ESC: u32 = 9; // evdev KEY_ESC 1
+const KEY_ENTER: u32 = 36; // evdev KEY_ENTER 28 -> spawn a terminal
 const BAR_RADIUS: f32 = 0.0;
 const DOCK_RADIUS: f32 = 16.0;
 
@@ -284,9 +285,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let libinput_backend = LibinputInputBackend::new(libinput);
     handle.insert_source(libinput_backend, move |event, _, data| {
         if let InputEvent::Keyboard { event } = event {
-            if event.state() == KeyState::Pressed && event.key_code() == KEY_ESC.into() {
-                tracing::info!("Esc pressed, exiting");
-                data.running = false;
+            if event.state() == KeyState::Pressed {
+                let code = event.key_code();
+                if code == KEY_ESC.into() {
+                    tracing::info!("Esc pressed, exiting");
+                    data.running = false;
+                } else if code == KEY_ENTER.into() {
+                    // Spawn a terminal. The child inherits WAYLAND_DISPLAY +
+                    // XDG_RUNTIME_DIR from us, so it connects to ZenOS directly.
+                    tracing::info!("Enter pressed, launching foot");
+                    match std::process::Command::new("foot").spawn() {
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("failed to launch foot: {e}"),
+                    }
+                }
             }
         }
     })?;
