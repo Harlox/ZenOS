@@ -61,8 +61,8 @@ const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
 const DOCK_MARGIN: i32 = 15;
 /// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
-const KEY_ESC: u32 = 9; // evdev KEY_ESC 1
-const KEY_ENTER: u32 = 36; // evdev KEY_ENTER 28 -> spawn a terminal
+const KEY_ESC: u32 = 9; // evdev KEY_ESC 1 -> quit
+const KEY_F1: u32 = 67; // evdev KEY_F1 59 -> spawn a terminal (Enter stays free)
 const BAR_RADIUS: f32 = 0.0;
 const DOCK_RADIUS: f32 = 16.0;
 
@@ -322,8 +322,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         tracing::info!("Esc pressed, exiting");
                         data.running = false;
                         return FilterResult::Intercept(());
-                    } else if code == KEY_ENTER.into() {
-                        tracing::info!("Enter pressed, launching foot");
+                    } else if code == KEY_F1.into() {
+                        tracing::info!("F1 pressed, launching foot");
                         let _ = std::process::Command::new("foot").spawn();
                         return FilterResult::Intercept(());
                     }
