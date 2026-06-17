@@ -562,12 +562,17 @@ impl Gpu {
             match dock_icons.get(i) {
                 Some(Some(tex)) => {
                     // Real icons already have rounded/transparent art — draw
-                    // them directly (no extra mask that would clip the artwork).
+                    // them directly. src MUST be the full texture: with `size`
+                    // set and src=None, smithay samples only a size×size corner.
+                    let src = Rectangle::<f64, Logical>::from_loc_and_size(
+                        (0.0, 0.0),
+                        (ICON_TEX as f64, ICON_TEX as f64),
+                    );
                     elements.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
                         Point::from((x as f64, y as f64)),
                         tex,
                         None,
-                        None,
+                        Some(src),
                         Some(Size::from((size, size))),
                         Kind::Unspecified,
                     )));
