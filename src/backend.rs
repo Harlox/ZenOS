@@ -187,6 +187,9 @@ pub struct Gpu {
     pub rounded_top: GlesPixelProgram,
     /// One Surface per connected output, keyed by its CRTC handle.
     pub surfaces: HashMap<crtc::Handle, Surface>,
+    /// Frames flipped since `fps_since`, for the once-a-second FPS log.
+    pub frames: u32,
+    pub fps_since: std::time::Instant,
 }
 
 impl Gpu {
@@ -194,9 +197,19 @@ impl Gpu {
     pub fn render_all(&mut self, space: &Space<Window>, cursor: (i32, i32)) {
         let crtcs: Vec<crtc::Handle> = self.surfaces.keys().copied().collect();
         for crtc in crtcs {
-            if let Err(e) = self.render_surface(crtc, space, cursor) {
-                tracing::error!("render surface failed: {e}");
+            match self.render_surface(crtc, space, cursor) {
+                Ok(true) => self.frames += 1,
+                Ok(false) => {}
+                Err(e) => tracing::error!("render surface failed: {e}"),
             }
+        }
+        // Once a second, report flips/s (≈ FPS of the busiest output). With
+        // event-driven rendering this is 0 when idle, ~refresh under activity.
+        let elapsed = self.fps_since.elapsed();
+        if elapsed.as_secs() >= 1 {
+            tracing::info!("{} flips/s", self.frames as f64 / elapsed.as_secs_f64());
+            self.frames = 0;
+            self.fps_since = std::time::Instant::now();
         }
     }
 
@@ -752,6 +765,8 @@ fn open_device(
             rounded,
             rounded_top,
             surfaces: HashMap::new(),
+            frames: 0,
+            fps_since: std::time::Instant::now(),
         },
         drm_notifier,
     ))
