@@ -824,7 +824,7 @@ impl Gpu {
         // F2 screenshot: re-render the full frame into a temp texture and save
         // it (clean, unlike a phone photo). Rare path; ignore on error.
         if shot {
-            let capture = || -> Result<(), Box<dyn std::error::Error>> {
+            let mut capture = || -> Result<(), Box<dyn std::error::Error>> {
                 let mut shot_tex =
                     renderer.create_buffer(Fourcc::Abgr8888, Size::from((w, h)))?;
                 let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
