@@ -64,16 +64,18 @@ use crate::state::ZenState;
 const CLEAR: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
 // Slightly translucent UI (fake glass; true backdrop blur is a later pass).
 const BAR_COLOR: [f32; 4] = [0.16, 0.16, 0.18, 0.70];
-// macOS-style dock: neutral frosted body (low alpha so the blur shows through,
-// not a washed tint) + a faint bright rim.
-const DOCK_COLOR: [f32; 4] = [0.90, 0.91, 0.94, 0.18];
-const DOCK_BORDER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
+// macOS-style dock: very transparent neutral body (blur dominates, not a milky
+// tint) + a barely-there hairline rim (not a bright outline).
+const DOCK_COLOR: [f32; 4] = [0.86, 0.87, 0.91, 0.12];
+const DOCK_BORDER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.18];
 const DOCK_BORDER_W: f32 = 1.0;
+/// Thin vertical separator between dock app groups.
+const SEP_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.20];
 const BAR_H: i32 = 30;
 const DOCK_H: i32 = 64;
 const DOCK_MARGIN: i32 = 14; // gap from the bottom of the screen
-const ICON_SIZE: i32 = 48;
-const ICON_GAP: i32 = 12;
+const ICON_SIZE: i32 = 50;
+const ICON_GAP: i32 = 10;
 const DOCK_PAD_X: i32 = 14; // dock side padding (left of first icon)
 const DOCK_PAD_Y: i32 = (DOCK_H - ICON_SIZE) / 2;
 /// Hover magnification (macOS-style): icon under the cursor scales up to MAG_MAX,
@@ -98,6 +100,8 @@ struct DockApp {
     exec: &'static str,
     icons: &'static [&'static str],
     placeholder: [f32; 4],
+    /// Draw a group separator immediately before this icon.
+    sep_before: bool,
 }
 const DOCK_APPS: &[DockApp] = &[
     DockApp {
@@ -107,41 +111,49 @@ const DOCK_APPS: &[DockApp] = &[
             "/usr/share/icons/hicolor/256x256/apps/foot.png",
         ],
         placeholder: [0.20, 0.22, 0.28, 0.85],
+        sep_before: false,
     },
     DockApp {
         exec: "firefox",
         icons: &["/usr/share/icons/hicolor/48x48/apps/firefox.png"],
         placeholder: [0.95, 0.45, 0.15, 0.9], // orange
+        sep_before: true,
     },
     DockApp {
         exec: "files",
         icons: &["/usr/share/icons/hicolor/48x48/apps/org.gnome.Nautilus.png"],
         placeholder: [0.20, 0.55, 0.95, 0.9], // blue
+        sep_before: false,
     },
     DockApp {
         exec: "code",
         icons: &["/usr/share/icons/hicolor/48x48/apps/code.png"],
         placeholder: [0.15, 0.50, 0.75, 0.9], // teal-blue
+        sep_before: false,
     },
     DockApp {
         exec: "thunderbird",
         icons: &["/usr/share/icons/hicolor/48x48/apps/thunderbird.png"],
         placeholder: [0.30, 0.70, 0.95, 0.9], // sky
+        sep_before: false,
     },
     DockApp {
         exec: "spotify",
         icons: &["/usr/share/icons/hicolor/48x48/apps/spotify.png"],
         placeholder: [0.20, 0.80, 0.40, 0.9], // green
+        sep_before: false,
     },
     DockApp {
         exec: "gimp",
         icons: &["/usr/share/icons/hicolor/48x48/apps/gimp.png"],
         placeholder: [0.65, 0.45, 0.30, 0.9], // brown
+        sep_before: true,
     },
     DockApp {
         exec: "blender",
         icons: &["/usr/share/icons/hicolor/48x48/apps/blender.png"],
         placeholder: [0.95, 0.55, 0.20, 0.9], // amber
+        sep_before: false,
     },
 ];
 /// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
@@ -506,6 +518,26 @@ impl Gpu {
         let baseline = dock_y + DOCK_H - DOCK_PAD_Y; // icon bottom edge
         for (i, app) in DOCK_APPS.iter().enumerate() {
             let (bx, _) = dock_icon_pos(w, h, i, DOCK_APPS.len());
+
+            // Group separator (thin vertical line centered in the gap before).
+            if app.sep_before && i > 0 {
+                let sh = ICON_SIZE - 16;
+                let sx = bx - ICON_GAP / 2;
+                let sy = baseline - ICON_SIZE + 8;
+                elements.push(ZenElement::Ui(PixelShaderElement::new(
+                    rounded.clone(),
+                    Rectangle::from_loc_and_size((sx, sy), (2, sh)),
+                    None,
+                    1.0,
+                    vec![
+                        Uniform::new("u_color", SEP_COLOR),
+                        Uniform::new("u_radius", 1.0f32),
+                        Uniform::new("u_size", [2.0f32, sh as f32]),
+                    ],
+                    Kind::Unspecified,
+                )));
+            }
+
             let icon_cx = bx + ICON_SIZE / 2;
             let mag = if hover {
                 let dist = (cursor_lx - icon_cx).abs() as f32;
