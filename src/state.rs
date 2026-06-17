@@ -5,6 +5,7 @@ use smithay::input::{Seat, SeatState};
 use smithay::reexports::calloop::LoopSignal;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::utils::{Logical, Point};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
@@ -38,6 +39,18 @@ pub struct ZenState {
     pub seat_state: SeatState<ZenState>,
     pub data_device_state: DataDeviceState,
     pub seat: Seat<ZenState>,
+
+    /// Cursor position in global logical coords.
+    pub pointer_location: Point<f64, Logical>,
+    /// Active interactive move (Super+drag): window + pointer/window start.
+    pub move_grab: Option<MoveGrab>,
+}
+
+/// Tracks an interactive window move.
+pub struct MoveGrab {
+    pub window: Window,
+    pub start_ptr: Point<f64, Logical>,
+    pub start_win: Point<i32, Logical>,
 }
 
 impl ZenState {
@@ -74,6 +87,8 @@ impl ZenState {
             seat_state,
             data_device_state,
             seat,
+            pointer_location: (0.0, 0.0).into(),
+            move_grab: None,
         }
     }
 
@@ -84,10 +99,12 @@ impl ZenState {
             gpu,
             space,
             start_time,
+            pointer_location,
             ..
         } = self;
         let Some(gpu) = gpu else { return };
 
+        gpu.cursor_pos = (pointer_location.x as i32, pointer_location.y as i32);
         if !gpu.pending_flip {
             match gpu.render(space) {
                 Ok(true) => gpu.pending_flip = true,

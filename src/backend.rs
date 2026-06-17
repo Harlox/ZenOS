@@ -21,9 +21,13 @@ use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmDeviceNotifier, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
-use smithay::backend::input::{Event, InputEvent, KeyState, KeyboardKeyEvent};
+use smithay::backend::input::{
+    ButtonState, Event, InputEvent, KeyState, KeyboardKeyEvent, PointerButtonEvent,
+    PointerMotionEvent,
+};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::input::keyboard::FilterResult;
+use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::reexports::input::Libinput;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
@@ -48,7 +52,7 @@ use smithay::wayland::socket::ListeningSocketSource;
 
 use std::sync::Arc;
 
-use crate::state::ClientState;
+use crate::state::{ClientState, MoveGrab};
 
 use crate::state::ZenState;
 
@@ -65,6 +69,10 @@ const KEY_ESC: u32 = 9; // evdev KEY_ESC 1 -> quit
 const KEY_F1: u32 = 67; // evdev KEY_F1 59 -> spawn a terminal (Enter stays free)
 const BAR_RADIUS: f32 = 0.0;
 const DOCK_RADIUS: f32 = 16.0;
+const CURSOR_SIZE: i32 = 12;
+const CURSOR_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
+/// Left mouse button (evdev BTN_LEFT).
+const BTN_LEFT: u32 = 0x110;
 
 /// Rounded-rectangle pixel shader (GLSL ES 100; no #version per smithay).
 /// Built-in uniforms: `size` (px), `alpha`. Custom: `u_color`, `u_radius`.
@@ -124,6 +132,8 @@ pub struct Gpu {
     /// True while a page-flip is in flight (cleared on VBlank). Avoids queuing a
     /// second flip before the first completes.
     pub pending_flip: bool,
+    /// Cursor position in px (updated each frame from pointer_location).
+    pub cursor_pos: (i32, i32),
 }
 
 impl Gpu {
@@ -159,8 +169,26 @@ impl Gpu {
             Kind::Unspecified,
         );
 
-        // Front-to-back: UI on top, then client windows.
-        let mut elements: Vec<ZenElement> = vec![ZenElement::Ui(bar), ZenElement::Ui(dock)];
+        let (cx, cy) = self.cursor_pos;
+        let cursor = PixelShaderElement::new(
+            self.rounded.clone(),
+            Rectangle::from_loc_and_size((cx, cy), (CURSOR_SIZE, CURSOR_SIZE)),
+            None,
+            1.0,
+            vec![
+                Uniform::new("u_color", CURSOR_COLOR),
+                Uniform::new("u_radius", 2.0f32),
+                Uniform::new("u_size", [CURSOR_SIZE as f32, CURSOR_SIZE as f32]),
+            ],
+            Kind::Unspecified,
+        );
+
+        // Front-to-back: cursor, UI, then client windows.
+        let mut elements: Vec<ZenElement> = vec![
+            ZenElement::Ui(cursor),
+            ZenElement::Ui(bar),
+            ZenElement::Ui(dock),
+        ];
         let scale = Scale::from(1.0);
         for window in space.elements() {
             let loc = space
@@ -308,8 +336,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .udev_assign_seat(&seat_name)
         .map_err(|_| "libinput udev_assign_seat failed")?;
     let libinput_backend = LibinputInputBackend::new(libinput);
-    handle.insert_source(libinput_backend, move |event, _, data| {
-        if let InputEvent::Keyboard { event } = event {
+    handle.insert_source(libinput_backend, move |event, _, data| match event {
+        InputEvent::Keyboard { event } => {
             let keyboard = data.seat.get_keyboard().unwrap();
             let serial = SERIAL_COUNTER.next_serial();
             let time = event.time_msec();
@@ -331,6 +359,78 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 FilterResult::Forward
             });
         }
+        InputEvent::PointerMotion { event } => {
+            let (sw, sh) = data.gpu.as_ref().map(|g| g.size).unwrap_or((0, 0));
+            let mut loc = data.pointer_location;
+            loc.x = (loc.x + event.delta_x()).clamp(0.0, sw as f64);
+            loc.y = (loc.y + event.delta_y()).clamp(0.0, sh as f64);
+            data.pointer_location = loc;
+
+            if let Some(grab) = &data.move_grab {
+                let dx = (loc.x - grab.start_ptr.x) as i32;
+                let dy = (loc.y - grab.start_ptr.y) as i32;
+                let new = (grab.start_win.x + dx, grab.start_win.y + dy);
+                let window = grab.window.clone();
+                data.space.map_element(window, new, false);
+            } else {
+                let focus = data
+                    .space
+                    .element_under(loc)
+                    .and_then(|(w, p)| w.toplevel().map(|t| (t.wl_surface().clone(), p.to_f64())));
+                let pointer = data.seat.get_pointer().unwrap();
+                let serial = SERIAL_COUNTER.next_serial();
+                let time = event.time_msec();
+                pointer.motion(
+                    data,
+                    focus,
+                    &MotionEvent {
+                        location: loc,
+                        serial,
+                        time,
+                    },
+                );
+                pointer.frame(data);
+            }
+        }
+        InputEvent::PointerButton { event } => {
+            let serial = SERIAL_COUNTER.next_serial();
+            let time = event.time_msec();
+            let button = event.button_code();
+            let button_state = event.state();
+            if button_state == ButtonState::Pressed {
+                let loc = data.pointer_location;
+                let under = data.space.element_under(loc).map(|(w, p)| (w.clone(), p));
+                if let Some((window, win_loc)) = under {
+                    let keyboard = data.seat.get_keyboard().unwrap();
+                    let mods = keyboard.modifier_state();
+                    if let Some(s) = window.toplevel().map(|t| t.wl_surface().clone()) {
+                        keyboard.set_focus(data, Some(s), serial);
+                    }
+                    // Super + left drag = move the window.
+                    if mods.logo && button == BTN_LEFT {
+                        data.move_grab = Some(MoveGrab {
+                            window,
+                            start_ptr: loc,
+                            start_win: win_loc,
+                        });
+                    }
+                }
+            } else {
+                data.move_grab = None;
+            }
+            let pointer = data.seat.get_pointer().unwrap();
+            pointer.button(
+                data,
+                &ButtonEvent {
+                    button,
+                    state: button_state,
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(data);
+        }
+        _ => {}
     })?;
 
     // --- Safety auto-exit ----------------------------------------------------
@@ -476,6 +576,7 @@ fn open_gpu(
             size,
             rounded,
             pending_flip: false,
+            cursor_pos: (0, 0),
         },
         drm_notifier,
     ))
