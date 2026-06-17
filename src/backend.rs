@@ -62,8 +62,9 @@ use crate::state::ZenState;
 
 /// Background clear color (matches the old wgpu clear).
 const CLEAR: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
-const BAR_COLOR: [f32; 4] = [0.18, 0.18, 0.18, 1.0];
-const DOCK_COLOR: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
+// Slightly translucent UI (fake glass; true backdrop blur is a later pass).
+const BAR_COLOR: [f32; 4] = [0.16, 0.16, 0.18, 0.70];
+const DOCK_COLOR: [f32; 4] = [0.28, 0.28, 0.30, 0.60];
 const BAR_H: i32 = 30;
 const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
@@ -81,7 +82,7 @@ const BTN_LEFT: u32 = 0x110;
 // --- macOS-style server-side decorations --------------------------------
 /// Titlebar height in px. Drawn above each toplevel's surface.
 const TITLEBAR_H: i32 = 28;
-const TITLEBAR_COLOR: [f32; 4] = [0.86, 0.86, 0.87, 1.0];
+const TITLEBAR_COLOR: [f32; 4] = [0.86, 0.86, 0.87, 0.94];
 const TITLEBAR_RADIUS: f32 = 10.0;
 /// Traffic-light buttons (close/min/max), left-aligned.
 const LIGHT_DIA: i32 = 13;
@@ -155,6 +156,36 @@ void main() {
 }
 "#;
 
+/// Soft drop-shadow shader. The shape (rounded box) sits inset by `u_blur` in
+/// the element; alpha fades from full at the shape edge to 0 over `u_blur` px.
+const SHADOW_SHADER: &str = r#"
+#extension GL_OES_standard_derivatives : enable
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 v_coords;
+uniform float alpha;
+uniform vec4 u_color;
+uniform float u_radius;
+uniform float u_blur;
+uniform vec2 u_size;
+
+float sd_rounded_box(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+}
+
+void main() {
+    vec2 p = v_coords * u_size - u_size * 0.5;
+    vec2 half_shape = u_size * 0.5 - u_blur;
+    float d = sd_rounded_box(p, half_shape, u_radius);
+    float a = u_color.a * (1.0 - smoothstep(0.0, u_blur, d)) * alpha;
+    gl_FragColor = vec4(u_color.rgb * a, a);
+}
+"#;
+
 /// The DrmCompositor type for one output: GBM allocator + GBM framebuffer
 /// exporter, `()` queue user-data, DrmDeviceFd-backed GBM.
 type ZenCompositor =
@@ -205,6 +236,8 @@ pub struct Gpu {
     pub rounded: GlesPixelProgram,
     /// Top-only rounded-rect shader, for SSD titlebars.
     pub rounded_top: GlesPixelProgram,
+    /// Soft drop-shadow shader (dock + windows).
+    pub shadow: GlesPixelProgram,
     /// One Surface per connected output, keyed by its CRTC handle.
     pub surfaces: HashMap<crtc::Handle, Surface>,
     /// Frames flipped since `fps_since`, for the once-a-second FPS log.
@@ -249,6 +282,7 @@ impl Gpu {
             renderer,
             rounded,
             rounded_top,
+            shadow,
             surfaces,
             text,
             ..
@@ -320,6 +354,10 @@ impl Gpu {
 
         elements.push(ZenElement::Ui(bar));
         elements.push(ZenElement::Ui(dock));
+        // Dock drop-shadow (behind the dock).
+        elements.push(ZenElement::Ui(shadow_element(
+            shadow, dock_x, dock_y + 6, DOCK_W, DOCK_H, DOCK_RADIUS, 18.0, 0.35,
+        )));
         let scale = Scale::from(1.0);
         for window in space.elements() {
             let g = space.element_location(window).unwrap_or_default();
@@ -393,6 +431,21 @@ impl Gpu {
                 1.0,
             );
             elements.extend(rels.into_iter().map(ZenElement::Window));
+
+            // Window drop-shadow (titlebar + content), behind the window.
+            if geo.size.w > 0 && geo.size.h > 0 {
+                let sh_h = TITLEBAR_H + geo.size.h;
+                elements.push(ZenElement::Ui(shadow_element(
+                    shadow,
+                    lx,
+                    ly - TITLEBAR_H + 8,
+                    geo.size.w,
+                    sh_h,
+                    TITLEBAR_RADIUS,
+                    24.0,
+                    0.45,
+                )));
+            }
         }
 
         // Wallpaper at the very bottom (drawn behind windows + UI). Opaque, so
@@ -820,6 +873,17 @@ fn open_device(
         ],
     )?;
 
+    // Soft drop-shadow shader.
+    let shadow = renderer.compile_custom_pixel_shader(
+        SHADOW_SHADER,
+        &[
+            UniformName::new("u_color", UniformType::_4f),
+            UniformName::new("u_radius", UniformType::_1f),
+            UniformName::new("u_blur", UniformType::_1f),
+            UniformName::new("u_size", UniformType::_2f),
+        ],
+    )?;
+
     Ok((
         Gpu {
             node,
@@ -829,6 +893,7 @@ fn open_device(
             renderer,
             rounded,
             rounded_top,
+            shadow,
             surfaces: HashMap::new(),
             frames: 0,
             fps_since: std::time::Instant::now(),
@@ -1017,6 +1082,34 @@ fn pick_mode(modes: &[DrmMode]) -> Option<DrmMode> {
         let (w, h) = m.size();
         (w as u64 * h as u64, m.vrefresh())
     })
+}
+
+/// A soft drop-shadow element for a rounded rect at (x,y,w,h). The element is
+/// expanded by `blur` on all sides; `strength` is the shadow's max opacity.
+fn shadow_element(
+    prog: &GlesPixelProgram,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    radius: f32,
+    blur: f32,
+    strength: f32,
+) -> PixelShaderElement {
+    let b = blur as i32;
+    PixelShaderElement::new(
+        prog.clone(),
+        Rectangle::from_loc_and_size((x - b, y - b), (w + 2 * b, h + 2 * b)),
+        None,
+        1.0,
+        vec![
+            Uniform::new("u_color", [0.0f32, 0.0, 0.0, strength]),
+            Uniform::new("u_radius", radius),
+            Uniform::new("u_blur", blur),
+            Uniform::new("u_size", [(w + 2 * b) as f32, (h + 2 * b) as f32]),
+        ],
+        Kind::Unspecified,
+    )
 }
 
 /// Position outputs left-to-right (stable order by CRTC) in the global Space.
