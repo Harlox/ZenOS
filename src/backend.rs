@@ -769,7 +769,9 @@ fn scan_connectors(
     let connected: Vec<connector::Info> = res
         .connectors()
         .iter()
-        .filter_map(|h| gpu.drm.get_connector(*h, false).ok())
+        // force_probe=true: re-read EDID so we get the full mode list (some
+        // drivers cache a degraded set otherwise).
+        .filter_map(|h| gpu.drm.get_connector(*h, true).ok())
         .filter(|c| c.state() == connector::State::Connected)
         .collect();
     let connected_handles: HashSet<connector::Handle> =
