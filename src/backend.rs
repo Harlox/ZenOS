@@ -76,6 +76,12 @@ const ICON_SIZE: i32 = 48;
 const ICON_GAP: i32 = 12;
 const DOCK_PAD_X: i32 = 14; // dock side padding (left of first icon)
 const DOCK_PAD_Y: i32 = (DOCK_H - ICON_SIZE) / 2;
+/// Hover magnification (macOS-style): icon under the cursor scales up to MAG_MAX,
+/// falling off over MAG_RADIUS px. Icons grow upward from the dock baseline.
+const MAG_MAX: f32 = 1.45;
+const MAG_RADIUS: f32 = 110.0;
+/// Icon corner radius as a fraction of icon size (squircle-ish mask).
+const ICON_RADIUS_FRAC: f32 = 0.23;
 
 /// Dock width hugs its content (macOS-style), not a fixed bar.
 fn dock_width(n: usize) -> i32 {
@@ -237,7 +243,8 @@ void main() {
     vec2 p = v_coords * u_size - u_size * 0.5;
     float d = sd_rounded_box(p, u_size * 0.5, u_radius);
     float cov = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
-    float a = cov * alpha;
+    // Respect the source alpha (icons have transparent areas; wallpaper is opaque).
+    float a = c.a * cov * alpha;
     gl_FragColor = vec4(c.rgb * a, a);
 }
 "#;
@@ -490,30 +497,57 @@ impl Gpu {
         elements.push(ZenElement::Ui(bar));
 
         // Dock app icons (in front of the dock background, pushed before it).
+        // macOS-style hover magnification: icons near the cursor scale up and
+        // grow upward from the dock baseline. All icons get a rounded (squircle)
+        // mask for a uniform look.
+        let cursor_lx = cursor.0 - ox;
+        let cursor_ly = cursor.1 - oy;
+        let hover = cursor_ly >= dock_y - 40; // pointer over/just above the dock
+        let baseline = dock_y + DOCK_H - DOCK_PAD_Y; // icon bottom edge
         for (i, app) in DOCK_APPS.iter().enumerate() {
-            let (ix, iy) = dock_icon_pos(w, h, i, DOCK_APPS.len());
+            let (bx, _) = dock_icon_pos(w, h, i, DOCK_APPS.len());
+            let icon_cx = bx + ICON_SIZE / 2;
+            let mag = if hover {
+                let dist = (cursor_lx - icon_cx).abs() as f32;
+                1.0 + (MAG_MAX - 1.0) * (1.0 - (dist / MAG_RADIUS)).max(0.0)
+            } else {
+                1.0
+            };
+            let size = (ICON_SIZE as f32 * mag).round() as i32;
+            let x = icon_cx - size / 2;
+            let y = baseline - size;
+            let radius = size as f32 * ICON_RADIUS_FRAC;
             match dock_icons.get(i) {
                 Some(Some(tex)) => {
-                    elements.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
-                        Point::from((ix as f64, iy as f64)),
+                    let inner = TextureRenderElement::from_texture_buffer(
+                        Point::from((x as f64, y as f64)),
                         tex,
                         None,
                         None,
-                        None,
+                        Some(Size::from((size, size))),
                         Kind::Unspecified,
-                    )));
+                    );
+                    let el = TextureShaderElement::new(
+                        inner,
+                        blur_mask.clone(),
+                        vec![
+                            Uniform::new("u_radius", radius),
+                            Uniform::new("u_size", [size as f32, size as f32]),
+                        ],
+                    );
+                    elements.push(ZenElement::Blur(el));
                 }
                 _ => {
                     // Colored rounded-square placeholder when the icon is missing.
                     elements.push(ZenElement::Ui(PixelShaderElement::new(
                         rounded.clone(),
-                        Rectangle::from_loc_and_size((ix, iy), (ICON_SIZE, ICON_SIZE)),
+                        Rectangle::from_loc_and_size((x, y), (size, size)),
                         None,
                         1.0,
                         vec![
                             Uniform::new("u_color", app.placeholder),
-                            Uniform::new("u_radius", 11.0f32),
-                            Uniform::new("u_size", [ICON_SIZE as f32, ICON_SIZE as f32]),
+                            Uniform::new("u_radius", radius),
+                            Uniform::new("u_size", [size as f32, size as f32]),
                         ],
                         Kind::Unspecified,
                     )));
