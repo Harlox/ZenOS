@@ -41,18 +41,22 @@ use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode as CalloopMode, PostAction};
 use smithay::reexports::drm::control::{connector, crtc, Device as _, Mode as DrmMode, ResourceHandles};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
 use smithay::utils::{DeviceFd, Logical, Point, Rectangle, SERIAL_COUNTER};
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use smithay::wayland::socket::ListeningSocketSource;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::state::{ClientState, MoveGrab};
+use crate::text::TextRenderer;
 
 use crate::state::ZenState;
 
@@ -162,8 +166,15 @@ render_elements! {
     pub ZenElement<=GlesRenderer>;
     Window = WaylandSurfaceRenderElement<GlesRenderer>,
     Ui = PixelShaderElement,
-    Wallpaper = TextureRenderElement<GlesTexture>,
+    // Any GLES texture: wallpaper + text glyphs.
+    Texture = TextureRenderElement<GlesTexture>,
 }
+
+// Text styling.
+const BAR_TEXT_PX: f32 = 18.0;
+const BAR_TEXT_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
+const TITLE_PX: f32 = 16.0;
+const TITLE_COLOR: [f32; 4] = [0.15, 0.15, 0.16, 1.0];
 
 /// One connected output: its CRTC's scanout compositor + logical Output, placed
 /// at `location` in the global Space.
@@ -199,6 +210,8 @@ pub struct Gpu {
     /// Frames flipped since `fps_since`, for the once-a-second FPS log.
     pub frames: u32,
     pub fps_since: std::time::Instant,
+    /// Glyph cache / text renderer (clock, titles).
+    pub text: TextRenderer,
 }
 
 impl Gpu {
@@ -237,6 +250,7 @@ impl Gpu {
             rounded,
             rounded_top,
             surfaces,
+            text,
             ..
         } = self;
         let Some(surface) = surfaces.get_mut(&crtc) else {
@@ -288,12 +302,24 @@ impl Gpu {
             Kind::Unspecified,
         );
 
-        // Front-to-back: cursor, UI, then client windows + decorations.
-        let mut elements: Vec<ZenElement> = vec![
-            ZenElement::Ui(cursor_el),
-            ZenElement::Ui(bar),
-            ZenElement::Ui(dock),
-        ];
+        // Front-to-back: cursor, then text (clock), UI bars, windows.
+        let mut elements: Vec<ZenElement> = vec![ZenElement::Ui(cursor_el)];
+
+        // Top-bar clock, right-aligned.
+        let now = chrono::Local::now().format("%H:%M").to_string();
+        let cw = text.measure(renderer, &now, BAR_TEXT_PX);
+        let clock = text.text(
+            renderer,
+            &now,
+            w - cw - 14,
+            BAR_H / 2 + (BAR_TEXT_PX as i32) / 3,
+            BAR_TEXT_PX,
+            BAR_TEXT_COLOR,
+        );
+        elements.extend(clock.into_iter().map(ZenElement::Texture));
+
+        elements.push(ZenElement::Ui(bar));
+        elements.push(ZenElement::Ui(dock));
         let scale = Scale::from(1.0);
         for window in space.elements() {
             let g = space.element_location(window).unwrap_or_default();
@@ -335,6 +361,27 @@ impl Gpu {
                     );
                     elements.push(ZenElement::Ui(light));
                 }
+
+                // Centered window title (in front of the titlebar).
+                let title = window
+                    .toplevel()
+                    .and_then(|t| {
+                        with_states(t.wl_surface(), |states| {
+                            states
+                                .data_map
+                                .get::<XdgToplevelSurfaceData>()
+                                .and_then(|d| d.lock().unwrap().title.clone())
+                        })
+                    })
+                    .unwrap_or_default();
+                if !title.is_empty() {
+                    let tw_text = text.measure(renderer, &title, TITLE_PX);
+                    let tx_text = tx + (geo.size.w - tw_text) / 2;
+                    let baseline = ty + TITLEBAR_H / 2 + (TITLE_PX as i32) / 3;
+                    let glyphs = text.text(renderer, &title, tx_text, baseline, TITLE_PX, TITLE_COLOR);
+                    elements.extend(glyphs.into_iter().map(ZenElement::Texture));
+                }
+
                 elements.push(ZenElement::Ui(titlebar));
             }
 
@@ -359,7 +406,7 @@ impl Gpu {
                 None,
                 Kind::Unspecified,
             );
-            elements.push(ZenElement::Wallpaper(element));
+            elements.push(ZenElement::Texture(element));
         }
 
         let res = surface.compositor.render_frame::<_, ZenElement>(
@@ -677,6 +724,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     })?;
 
+    // 1Hz tick so the clock redraws even when otherwise idle (minute rollover).
+    handle.insert_source(
+        Timer::from_duration(Duration::from_secs(1)),
+        |_, _, data: &mut ZenState| {
+            data.render();
+            TimeoutAction::ToDuration(Duration::from_secs(1))
+        },
+    )?;
+
     // --- Safety auto-exit ----------------------------------------------------
     let timeout = std::env::var("ZENOS_TIMEOUT")
         .ok()
@@ -776,6 +832,7 @@ fn open_device(
             surfaces: HashMap::new(),
             frames: 0,
             fps_since: std::time::Instant::now(),
+            text: TextRenderer::new(),
         },
         drm_notifier,
     ))

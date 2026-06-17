@@ -6,6 +6,7 @@
 mod backend;
 mod handlers;
 mod state;
+mod text;
 
 fn main() {
     tracing_subscriber::fmt().init();
