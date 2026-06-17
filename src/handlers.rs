@@ -145,12 +145,12 @@ impl XdgShellHandler for ZenState {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let wl = surface.wl_surface();
         self.placed.remove(wl);
-        if let Some(window) = self
+        let window = self
             .space
             .elements()
             .find(|w| w.toplevel().map(|t| t.wl_surface() == wl).unwrap_or(false))
-            .cloned()
-        {
+            .cloned();
+        if let Some(window) = window {
             self.space.unmap_elem(&window);
         }
         self.dirty = true;
