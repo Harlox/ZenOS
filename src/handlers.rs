@@ -96,7 +96,8 @@ impl XdgShellHandler for ZenState {
         tracing::info!("new toplevel window");
         let wl_surface = surface.wl_surface().clone();
         let window = Window::new_wayland_window(surface);
-        self.space.map_element(window, (0, 0), false);
+        // Place below the top bar (40px) so the whole window is visible.
+        self.space.map_element(window, (40, 40), false);
         // Give the new window keyboard focus.
         if let Some(keyboard) = self.seat.get_keyboard() {
             let serial = SERIAL_COUNTER.next_serial();
