@@ -98,62 +98,72 @@ fn dock_width(n: usize) -> i32 {
 /// exists wins; none -> a colored placeholder square using `placeholder`).
 struct DockApp {
     exec: &'static str,
-    icons: &'static [&'static str],
+    /// Icon PNG embedded in the binary (works regardless of CWD/install).
+    icon: &'static [u8],
     placeholder: [f32; 4],
     /// Draw a group separator immediately before this icon.
     sep_before: bool,
 }
 const DOCK_APPS: &[DockApp] = &[
     DockApp {
-        exec: "foot",
-        icons: &[
-            "/usr/share/icons/hicolor/48x48/apps/foot.png",
-            "/usr/share/icons/hicolor/256x256/apps/foot.png",
-        ],
-        placeholder: [0.20, 0.22, 0.28, 0.85],
+        exec: "thunar",
+        icon: include_bytes!("../assets/icons/Finder.png"),
+        placeholder: [0.20, 0.55, 0.95, 0.9],
         sep_before: false,
     },
     DockApp {
         exec: "firefox",
-        icons: &["/usr/share/icons/hicolor/48x48/apps/firefox.png"],
-        placeholder: [0.95, 0.45, 0.15, 0.9], // orange
+        icon: include_bytes!("../assets/icons/Safari.png"),
+        placeholder: [0.20, 0.55, 0.95, 0.9],
         sep_before: true,
     },
     DockApp {
-        exec: "files",
-        icons: &["/usr/share/icons/hicolor/48x48/apps/org.gnome.Nautilus.png"],
-        placeholder: [0.20, 0.55, 0.95, 0.9], // blue
+        exec: "gnome-calendar",
+        icon: include_bytes!("../assets/icons/Calendar.png"),
+        placeholder: [0.90, 0.30, 0.25, 0.9],
         sep_before: false,
     },
     DockApp {
-        exec: "code",
-        icons: &["/usr/share/icons/hicolor/48x48/apps/code.png"],
-        placeholder: [0.15, 0.50, 0.75, 0.9], // teal-blue
+        exec: "gnome-text-editor",
+        icon: include_bytes!("../assets/icons/Notes.png"),
+        placeholder: [0.95, 0.80, 0.25, 0.9],
         sep_before: false,
     },
     DockApp {
-        exec: "thunderbird",
-        icons: &["/usr/share/icons/hicolor/48x48/apps/thunderbird.png"],
-        placeholder: [0.30, 0.70, 0.95, 0.9], // sky
+        exec: "foot",
+        icon: include_bytes!("../assets/icons/Maps.png"),
+        placeholder: [0.45, 0.75, 0.40, 0.9],
         sep_before: false,
     },
     DockApp {
-        exec: "spotify",
-        icons: &["/usr/share/icons/hicolor/48x48/apps/spotify.png"],
-        placeholder: [0.20, 0.80, 0.40, 0.9], // green
+        exec: "gnome-calculator",
+        icon: include_bytes!("../assets/icons/Calculator.png"),
+        placeholder: [0.55, 0.58, 0.66, 0.9],
         sep_before: false,
     },
     DockApp {
-        exec: "gimp",
-        icons: &["/usr/share/icons/hicolor/48x48/apps/gimp.png"],
-        placeholder: [0.65, 0.45, 0.30, 0.9], // brown
+        exec: "foot",
+        icon: include_bytes!("../assets/icons/Settings.png"),
+        placeholder: [0.55, 0.58, 0.66, 0.9],
+        sep_before: false,
+    },
+    DockApp {
+        exec: "foot",
+        icon: include_bytes!("../assets/icons/App Store.png"),
+        placeholder: [0.20, 0.55, 0.95, 0.9],
+        sep_before: false,
+    },
+    DockApp {
+        exec: "foot",
+        icon: include_bytes!("../assets/icons/Terminal.png"),
+        placeholder: [0.20, 0.22, 0.28, 0.9],
         sep_before: true,
     },
     DockApp {
-        exec: "blender",
-        icons: &["/usr/share/icons/hicolor/48x48/apps/blender.png"],
-        placeholder: [0.95, 0.55, 0.20, 0.9], // amber
-        sep_before: false,
+        exec: "foot",
+        icon: include_bytes!("../assets/icons/Trash Full.png"),
+        placeholder: [0.55, 0.58, 0.66, 0.9],
+        sep_before: true,
     },
 ];
 /// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
@@ -551,23 +561,16 @@ impl Gpu {
             let radius = size as f32 * ICON_RADIUS_FRAC;
             match dock_icons.get(i) {
                 Some(Some(tex)) => {
-                    let inner = TextureRenderElement::from_texture_buffer(
+                    // Real icons already have rounded/transparent art — draw
+                    // them directly (no extra mask that would clip the artwork).
+                    elements.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
                         Point::from((x as f64, y as f64)),
                         tex,
                         None,
                         None,
                         Some(Size::from((size, size))),
                         Kind::Unspecified,
-                    );
-                    let el = TextureShaderElement::new(
-                        inner,
-                        blur_mask.clone(),
-                        vec![
-                            Uniform::new("u_radius", radius),
-                            Uniform::new("u_size", [size as f32, size as f32]),
-                        ],
-                    );
-                    elements.push(ZenElement::Blur(el));
+                    )));
                 }
                 _ => {
                     // Colored rounded-square placeholder when the icon is missing.
@@ -1177,7 +1180,7 @@ fn open_device(
     // Dock icons (load once at device open).
     let dock_icons = DOCK_APPS
         .iter()
-        .map(|app| load_icon(&mut renderer, app.icons))
+        .map(|app| load_icon(&mut renderer, app.icon))
         .collect();
 
     Ok((
@@ -1410,32 +1413,26 @@ fn dock_icon_pos(w: i32, h: i32, i: usize, n: usize) -> (i32, i32) {
     (x, y)
 }
 
-/// Load the first existing icon from `candidates`, scaled to ICON_SIZE.
-fn load_icon(
-    renderer: &mut GlesRenderer,
-    candidates: &[&str],
-) -> Option<TextureBuffer<GlesTexture>> {
-    for path in candidates {
-        let Ok(img) = image::open(*path) else { continue };
-        let scaled =
-            img.resize_to_fill(ICON_SIZE as u32, ICON_SIZE as u32, image::imageops::FilterType::Lanczos3);
-        let rgba = scaled.to_rgba8();
-        if let Ok(buf) = TextureBuffer::from_memory(
-            renderer,
-            rgba.as_raw(),
-            Fourcc::Abgr8888,
-            (ICON_SIZE, ICON_SIZE),
-            false,
-            1,
-            Transform::Normal,
-            None,
-        ) {
-            tracing::info!("dock icon: {path}");
-            return Some(buf);
-        }
-    }
-    tracing::warn!("no icon found in {candidates:?}; using placeholder");
-    None
+/// Texture resolution for dock icons (> ICON_SIZE so magnified icons stay crisp).
+const ICON_TEX: i32 = 128;
+
+/// Decode an embedded icon PNG and upload it as a square texture.
+fn load_icon(renderer: &mut GlesRenderer, bytes: &[u8]) -> Option<TextureBuffer<GlesTexture>> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let scaled =
+        img.resize_to_fill(ICON_TEX as u32, ICON_TEX as u32, image::imageops::FilterType::Lanczos3);
+    let rgba = scaled.to_rgba8();
+    TextureBuffer::from_memory(
+        renderer,
+        rgba.as_raw(),
+        Fourcc::Abgr8888,
+        (ICON_TEX, ICON_TEX),
+        false,
+        1,
+        Transform::Normal,
+        None,
+    )
+    .ok()
 }
 
 /// Load the wallpaper from `$ZENOS_WALLPAPER` (default
