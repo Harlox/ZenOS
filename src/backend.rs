@@ -19,7 +19,7 @@ use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
-use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
+use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmDeviceNotifier, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{InputEvent, KeyState, KeyboardKeyEvent};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
@@ -258,9 +258,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("session active after {tries} dispatch(es)");
 
     // Open + init the primary GPU (steps 3-4).
-    let mut gpu = open_gpu(&mut state.session, primary, &dev_path)?;
+    let (mut gpu, drm_notifier) = open_gpu(&mut state.session, primary, &dev_path)?;
 
-    // First frame.
+    // First frame: starts the page-flip chain. Subsequent frames are driven by
+    // the DRM VBlank event below.
     if let Err(e) = gpu.render(&state.space) {
         tracing::error!("first render failed: {e}");
     } else {
@@ -271,6 +272,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _output_global = gpu.output.create_global::<ZenState>(&state.display_handle);
     state.space.map_output(&gpu.output, (0, 0));
     state.gpu = Some(gpu);
+
+    // DRM VBlank: ack the completed flip, then render + queue the next frame.
+    // This is what keeps the screen updating (so client windows appear).
+    handle.insert_source(drm_notifier, move |event, _, data| match event {
+        DrmEvent::VBlank(_crtc) => {
+            if let Some(gpu) = &mut data.gpu {
+                let _ = gpu.compositor.frame_submitted();
+            }
+            data.render();
+        }
+        DrmEvent::Error(e) => tracing::error!("DRM error: {e:?}"),
+    })?;
 
     handle.insert_source(udev_backend, move |event, _, _data| match event {
         UdevEvent::Added { device_id, .. } => tracing::debug!("udev add {device_id}"),
@@ -323,12 +336,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     while state.running {
         event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
 
-        // Service Wayland clients.
+        // Service Wayland clients. Rendering is driven by the DRM VBlank source.
         display.dispatch_clients(&mut state)?;
-
-        // Redraw (windows + UI), then flush replies.
         state.space.refresh();
-        state.render();
         display.flush_clients()?;
 
         if let Some(d) = deadline {
@@ -350,11 +360,11 @@ fn open_gpu(
     session: &mut LibSeatSession,
     node: DrmNode,
     path: &std::path::Path,
-) -> Result<Gpu, Box<dyn std::error::Error>> {
+) -> Result<(Gpu, DrmDeviceNotifier), Box<dyn std::error::Error>> {
     let fd = session.open(path, OFlags::RDWR | OFlags::CLOEXEC)?;
     let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
-    let (mut drm, _drm_notifier) = DrmDevice::new(drm_fd.clone(), true)?;
+    let (mut drm, drm_notifier) = DrmDevice::new(drm_fd.clone(), true)?;
     let gbm = GbmDevice::new(drm_fd)?;
 
     let allocator = GbmAllocator::new(
@@ -437,15 +447,18 @@ fn open_gpu(
 
     let size = (mode.size().0 as i32, mode.size().1 as i32);
 
-    Ok(Gpu {
-        node,
-        drm,
-        gbm,
-        allocator,
-        renderer,
-        output,
-        compositor,
-        size,
-        rounded,
-    })
+    Ok((
+        Gpu {
+            node,
+            drm,
+            gbm,
+            allocator,
+            renderer,
+            output,
+            compositor,
+            size,
+            rounded,
+        },
+        drm_notifier,
+    ))
 }
