@@ -76,6 +76,7 @@ impl CompositorHandler for ZenState {
                 // focused.
                 if let Some(keyboard) = self.seat.get_keyboard() {
                     if keyboard.current_focus().as_ref() != Some(&root) {
+                        tracing::info!("keyboard focus set on commit");
                         let serial = SERIAL_COUNTER.next_serial();
                         keyboard.set_focus(self, Some(root.clone()), serial);
                     }

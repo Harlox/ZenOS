@@ -315,6 +315,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let time = event.time_msec();
             let code = event.key_code();
             let key_state = event.state();
+            if key_state == KeyState::Pressed {
+                tracing::info!("key pressed: {code:?}");
+            }
             // Forward to the focused client, unless it's a compositor shortcut.
             keyboard.input::<(), _>(data, code, key_state, serial, time, |data, _mods, _sym| {
                 if key_state == KeyState::Pressed {
