@@ -732,7 +732,9 @@ impl Gpu {
             vec![
                 Uniform::new("u_radius", DOCK_RADIUS),
                 Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
-                Uniform::new("u_texel", [BLUR_STEP / dw as f32, BLUR_STEP / DOCK_H as f32]),
+                // v_coords is normalized over the FULL scene texture, so a 1px
+                // step is 1/scene_size (NOT 1/dock_size — that streaks badly).
+                Uniform::new("u_texel", [BLUR_STEP / w as f32, BLUR_STEP / h as f32]),
             ],
         )));
 
