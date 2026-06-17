@@ -251,6 +251,10 @@ varying vec2 v_coords;
 uniform float u_radius;
 uniform vec2 u_size;
 uniform vec2 u_texel;
+// The sampled src sub-rect in full-texture normalized coords, so we can map
+// v_coords back to element-local 0..1 for the rounded mask.
+uniform vec2 u_src_origin;
+uniform vec2 u_src_size;
 
 float sd_rounded_box(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
@@ -270,7 +274,8 @@ void main() {
         }
     }
     vec3 col = acc / wsum;
-    vec2 p = v_coords * u_size - u_size * 0.5;
+    vec2 local = (v_coords - u_src_origin) / u_src_size; // 0..1 over the dock
+    vec2 p = local * u_size - u_size * 0.5;
     float d = sd_rounded_box(p, u_size * 0.5, u_radius);
     float cov = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
     float a = cov * alpha;
@@ -786,6 +791,9 @@ impl Gpu {
                 // v_coords is normalized over the FULL scene texture, so a 1px
                 // step is 1/scene_size (NOT 1/dock_size — that streaks badly).
                 Uniform::new("u_texel", [BLUR_STEP / w as f32, BLUR_STEP / h as f32]),
+                // src sub-rect (dock region) in full-texture coords, for the mask.
+                Uniform::new("u_src_origin", [dock_x as f32 / w as f32, dock_y as f32 / h as f32]),
+                Uniform::new("u_src_size", [dw as f32 / w as f32, DOCK_H as f32 / h as f32]),
             ],
         )));
 
@@ -1273,6 +1281,8 @@ fn open_device(
             UniformName::new("u_radius", UniformType::_1f),
             UniformName::new("u_size", UniformType::_2f),
             UniformName::new("u_texel", UniformType::_2f),
+            UniformName::new("u_src_origin", UniformType::_2f),
+            UniformName::new("u_src_size", UniformType::_2f),
         ],
     )?;
 
