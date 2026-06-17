@@ -69,6 +69,31 @@ const BAR_H: i32 = 30;
 const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
 const DOCK_MARGIN: i32 = 15;
+const ICON_SIZE: i32 = 48;
+const ICON_GAP: i32 = 18;
+
+/// A dock entry: the binary to spawn on click + candidate icon paths (first that
+/// exists wins; none -> placeholder square).
+struct DockApp {
+    exec: &'static str,
+    icons: &'static [&'static str],
+}
+const DOCK_APPS: &[DockApp] = &[
+    DockApp {
+        exec: "foot",
+        icons: &[
+            "/usr/share/icons/hicolor/48x48/apps/foot.png",
+            "/usr/share/icons/hicolor/256x256/apps/foot.png",
+        ],
+    },
+    DockApp {
+        exec: "firefox",
+        icons: &[
+            "/usr/share/icons/hicolor/48x48/apps/firefox.png",
+            "/usr/share/icons/hicolor/128x128/apps/firefox.png",
+        ],
+    },
+];
 /// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
 const KEY_ESC: u32 = 9; // evdev KEY_ESC 1 -> quit
 const KEY_F1: u32 = 67; // evdev KEY_F1 59 -> spawn a terminal (Enter stays free)
@@ -156,36 +181,6 @@ void main() {
 }
 "#;
 
-/// Soft drop-shadow shader. The shape (rounded box) sits inset by `u_blur` in
-/// the element; alpha fades from full at the shape edge to 0 over `u_blur` px.
-const SHADOW_SHADER: &str = r#"
-#extension GL_OES_standard_derivatives : enable
-#ifdef GL_FRAGMENT_PRECISION_HIGH
-precision highp float;
-#else
-precision mediump float;
-#endif
-varying vec2 v_coords;
-uniform float alpha;
-uniform vec4 u_color;
-uniform float u_radius;
-uniform float u_blur;
-uniform vec2 u_size;
-
-float sd_rounded_box(vec2 p, vec2 b, float r) {
-    vec2 q = abs(p) - b + r;
-    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
-}
-
-void main() {
-    vec2 p = v_coords * u_size - u_size * 0.5;
-    vec2 half_shape = u_size * 0.5 - u_blur;
-    float d = sd_rounded_box(p, half_shape, u_radius);
-    float a = u_color.a * (1.0 - smoothstep(0.0, u_blur, d)) * alpha;
-    gl_FragColor = vec4(u_color.rgb * a, a);
-}
-"#;
-
 /// The DrmCompositor type for one output: GBM allocator + GBM framebuffer
 /// exporter, `()` queue user-data, DrmDeviceFd-backed GBM.
 type ZenCompositor =
@@ -236,8 +231,9 @@ pub struct Gpu {
     pub rounded: GlesPixelProgram,
     /// Top-only rounded-rect shader, for SSD titlebars.
     pub rounded_top: GlesPixelProgram,
-    /// Soft drop-shadow shader (dock + windows).
-    pub shadow: GlesPixelProgram,
+    /// Dock app icons (device-level, loaded once), one per DOCK_APPS entry.
+    /// None = icon file missing -> a placeholder square is drawn.
+    pub dock_icons: Vec<Option<TextureBuffer<GlesTexture>>>,
     /// One Surface per connected output, keyed by its CRTC handle.
     pub surfaces: HashMap<crtc::Handle, Surface>,
     /// Frames flipped since `fps_since`, for the once-a-second FPS log.
@@ -282,7 +278,7 @@ impl Gpu {
             renderer,
             rounded,
             rounded_top,
-            shadow,
+            dock_icons,
             surfaces,
             text,
             ..
@@ -353,11 +349,40 @@ impl Gpu {
         elements.extend(clock.into_iter().map(ZenElement::Texture));
 
         elements.push(ZenElement::Ui(bar));
+
+        // Dock app icons (in front of the dock background, pushed before it).
+        for (i, _app) in DOCK_APPS.iter().enumerate() {
+            let (ix, iy) = dock_icon_pos(w, h, i, DOCK_APPS.len());
+            match dock_icons.get(i) {
+                Some(Some(tex)) => {
+                    elements.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
+                        Point::from((ix as f64, iy as f64)),
+                        tex,
+                        None,
+                        None,
+                        None,
+                        Kind::Unspecified,
+                    )));
+                }
+                _ => {
+                    // Placeholder rounded square when the icon file is missing.
+                    elements.push(ZenElement::Ui(PixelShaderElement::new(
+                        rounded.clone(),
+                        Rectangle::from_loc_and_size((ix, iy), (ICON_SIZE, ICON_SIZE)),
+                        None,
+                        1.0,
+                        vec![
+                            Uniform::new("u_color", [0.45f32, 0.5, 0.6, 1.0]),
+                            Uniform::new("u_radius", 10.0f32),
+                            Uniform::new("u_size", [ICON_SIZE as f32, ICON_SIZE as f32]),
+                        ],
+                        Kind::Unspecified,
+                    )));
+                }
+            }
+        }
+
         elements.push(ZenElement::Ui(dock));
-        // Dock drop-shadow (behind the dock).
-        elements.push(ZenElement::Ui(shadow_element(
-            shadow, dock_x, dock_y + 6, DOCK_W, DOCK_H, DOCK_RADIUS, 18.0, 0.35,
-        )));
         let scale = Scale::from(1.0);
         for window in space.elements() {
             let g = space.element_location(window).unwrap_or_default();
@@ -431,21 +456,6 @@ impl Gpu {
                 1.0,
             );
             elements.extend(rels.into_iter().map(ZenElement::Window));
-
-            // Window drop-shadow (titlebar + content), behind the window.
-            if geo.size.w > 0 && geo.size.h > 0 {
-                let sh_h = TITLEBAR_H + geo.size.h;
-                elements.push(ZenElement::Ui(shadow_element(
-                    shadow,
-                    lx,
-                    ly - TITLEBAR_H + 8,
-                    geo.size.w,
-                    sh_h,
-                    TITLEBAR_RADIUS,
-                    24.0,
-                    0.45,
-                )));
-            }
         }
 
         // Wallpaper at the very bottom (drawn behind windows + UI). Opaque, so
@@ -693,6 +703,44 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             if button_state == ButtonState::Pressed {
                 let loc = data.pointer_location;
 
+                // Dock launch hit-test (icons live in each output's dock).
+                if button == BTN_LEFT {
+                    let mut launch = None;
+                    if let Some(gpu) = &data.gpu {
+                        'outer: for s in gpu.surfaces.values() {
+                            let (sw, sh) = s.size;
+                            let (ox, oy) = s.location;
+                            for (i, app) in DOCK_APPS.iter().enumerate() {
+                                let (ix, iy) = dock_icon_pos(sw, sh, i, DOCK_APPS.len());
+                                let r = Rectangle::from_loc_and_size(
+                                    (ox + ix, oy + iy),
+                                    (ICON_SIZE, ICON_SIZE),
+                                );
+                                if r.to_f64().contains(loc) {
+                                    launch = Some(app.exec);
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                    if let Some(exec) = launch {
+                        tracing::info!("dock launch: {exec}");
+                        let _ = std::process::Command::new(exec).spawn();
+                        let pointer = data.seat.get_pointer().unwrap();
+                        pointer.button(
+                            data,
+                            &ButtonEvent {
+                                button,
+                                state: button_state,
+                                serial,
+                                time,
+                            },
+                        );
+                        pointer.frame(data);
+                        return;
+                    }
+                }
+
                 // SSD titlebars live above the surface, outside the Space, so
                 // hit-test them manually before the normal surface focus path.
                 let deco = {
@@ -873,16 +921,11 @@ fn open_device(
         ],
     )?;
 
-    // Soft drop-shadow shader.
-    let shadow = renderer.compile_custom_pixel_shader(
-        SHADOW_SHADER,
-        &[
-            UniformName::new("u_color", UniformType::_4f),
-            UniformName::new("u_radius", UniformType::_1f),
-            UniformName::new("u_blur", UniformType::_1f),
-            UniformName::new("u_size", UniformType::_2f),
-        ],
-    )?;
+    // Dock icons (load once at device open).
+    let dock_icons = DOCK_APPS
+        .iter()
+        .map(|app| load_icon(&mut renderer, app.icons))
+        .collect();
 
     Ok((
         Gpu {
@@ -893,7 +936,7 @@ fn open_device(
             renderer,
             rounded,
             rounded_top,
-            shadow,
+            dock_icons,
             surfaces: HashMap::new(),
             frames: 0,
             fps_since: std::time::Instant::now(),
@@ -1084,34 +1127,6 @@ fn pick_mode(modes: &[DrmMode]) -> Option<DrmMode> {
     })
 }
 
-/// A soft drop-shadow element for a rounded rect at (x,y,w,h). The element is
-/// expanded by `blur` on all sides; `strength` is the shadow's max opacity.
-fn shadow_element(
-    prog: &GlesPixelProgram,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    radius: f32,
-    blur: f32,
-    strength: f32,
-) -> PixelShaderElement {
-    let b = blur as i32;
-    PixelShaderElement::new(
-        prog.clone(),
-        Rectangle::from_loc_and_size((x - b, y - b), (w + 2 * b, h + 2 * b)),
-        None,
-        1.0,
-        vec![
-            Uniform::new("u_color", [0.0f32, 0.0, 0.0, strength]),
-            Uniform::new("u_radius", radius),
-            Uniform::new("u_blur", blur),
-            Uniform::new("u_size", [(w + 2 * b) as f32, (h + 2 * b) as f32]),
-        ],
-        Kind::Unspecified,
-    )
-}
-
 /// Position outputs left-to-right (stable order by CRTC) in the global Space.
 fn relayout_outputs(gpu: &mut Gpu, space: &mut Space<Window>) {
     // crtc::Handle isn't Ord; order by output name for a stable left-to-right
@@ -1126,6 +1141,46 @@ fn relayout_outputs(gpu: &mut Gpu, space: &mut Space<Window>) {
             x += s.size.0;
         }
     }
+}
+
+/// Top-left (output-local) px of dock icon `i` of `n`, centered in the dock.
+fn dock_icon_pos(w: i32, h: i32, i: usize, n: usize) -> (i32, i32) {
+    let n = n as i32;
+    let total = n * ICON_SIZE + (n - 1).max(0) * ICON_GAP;
+    let dock_x = (w - DOCK_W) / 2;
+    let dock_y = h - DOCK_H - DOCK_MARGIN;
+    let start_x = dock_x + (DOCK_W - total) / 2;
+    let x = start_x + i as i32 * (ICON_SIZE + ICON_GAP);
+    let y = dock_y + (DOCK_H - ICON_SIZE) / 2;
+    (x, y)
+}
+
+/// Load the first existing icon from `candidates`, scaled to ICON_SIZE.
+fn load_icon(
+    renderer: &mut GlesRenderer,
+    candidates: &[&str],
+) -> Option<TextureBuffer<GlesTexture>> {
+    for path in candidates {
+        let Ok(img) = image::open(*path) else { continue };
+        let scaled =
+            img.resize_to_fill(ICON_SIZE as u32, ICON_SIZE as u32, image::imageops::FilterType::Lanczos3);
+        let rgba = scaled.to_rgba8();
+        if let Ok(buf) = TextureBuffer::from_memory(
+            renderer,
+            rgba.as_raw(),
+            Fourcc::Abgr8888,
+            (ICON_SIZE, ICON_SIZE),
+            false,
+            1,
+            Transform::Normal,
+            None,
+        ) {
+            tracing::info!("dock icon: {path}");
+            return Some(buf);
+        }
+    }
+    tracing::warn!("no icon found in {candidates:?}; using placeholder");
+    None
 }
 
 /// Load the wallpaper from `$ZENOS_WALLPAPER` (default
