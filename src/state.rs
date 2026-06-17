@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay::desktop::{PopupManager, Space, Window};
 use smithay::input::{Seat, SeatState};
@@ -80,16 +80,29 @@ impl ZenState {
     /// Render the current frame via the GPU (split borrows: gpu + space).
     /// Skips if a flip is already pending; only marks pending when one is queued.
     pub fn render(&mut self) {
-        let Self { gpu, space, .. } = self;
-        if let Some(gpu) = gpu {
-            if gpu.pending_flip {
-                return;
-            }
+        let Self {
+            gpu,
+            space,
+            start_time,
+            ..
+        } = self;
+        let Some(gpu) = gpu else { return };
+
+        if !gpu.pending_flip {
             match gpu.render(space) {
                 Ok(true) => gpu.pending_flip = true,
                 Ok(false) => {}
                 Err(e) => tracing::error!("render failed: {e}"),
             }
+        }
+
+        // Frame callbacks: tell clients (e.g. foot) they may draw the next
+        // frame. Without this they draw once and never update (typed text,
+        // cursor blink, etc. never appear).
+        let now = start_time.elapsed();
+        let output = gpu.output.clone();
+        for w in space.elements() {
+            w.send_frame(&output, now, Some(Duration::ZERO), |_, _| Some(output.clone()));
         }
     }
 }
