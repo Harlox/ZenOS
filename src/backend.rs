@@ -64,7 +64,10 @@ use crate::state::ZenState;
 const CLEAR: [f32; 4] = [0.08, 0.08, 0.08, 1.0];
 // Slightly translucent UI (fake glass; true backdrop blur is a later pass).
 const BAR_COLOR: [f32; 4] = [0.16, 0.16, 0.18, 0.70];
-const DOCK_COLOR: [f32; 4] = [0.28, 0.28, 0.30, 0.60];
+// macOS-style dock: light frosted body + bright rim highlight.
+const DOCK_COLOR: [f32; 4] = [0.82, 0.83, 0.88, 0.32];
+const DOCK_BORDER_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 0.45];
+const DOCK_BORDER_W: f32 = 1.5;
 const BAR_H: i32 = 30;
 const DOCK_W: i32 = 500;
 const DOCK_H: i32 = 65;
@@ -98,7 +101,7 @@ const DOCK_APPS: &[DockApp] = &[
 const KEY_ESC: u32 = 9; // evdev KEY_ESC 1 -> quit
 const KEY_F1: u32 = 67; // evdev KEY_F1 59 -> spawn a terminal (Enter stays free)
 const BAR_RADIUS: f32 = 0.0;
-const DOCK_RADIUS: f32 = 16.0;
+const DOCK_RADIUS: f32 = 22.0;
 const CURSOR_SIZE: i32 = 12;
 const CURSOR_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
 /// Left mouse button (evdev BTN_LEFT).
@@ -148,6 +151,41 @@ void main() {
     float a = u_color.a * cov * alpha;
     // smithay expects premultiplied alpha.
     gl_FragColor = vec4(u_color.rgb * a, a);
+}
+"#;
+
+/// Rounded box with a highlight border (inner stroke) — for the macOS-style
+/// dock: translucent body + a bright 1px rim.
+const BORDERED_SHADER: &str = r#"
+#extension GL_OES_standard_derivatives : enable
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
+precision mediump float;
+#endif
+varying vec2 v_coords;
+uniform float alpha;
+uniform vec4 u_color;
+uniform vec4 u_border_color;
+uniform float u_border;
+uniform float u_radius;
+uniform vec2 u_size;
+
+float sd_rounded_box(vec2 p, vec2 b, float r) {
+    vec2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+}
+
+void main() {
+    vec2 p = v_coords * u_size - u_size * 0.5;
+    float d = sd_rounded_box(p, u_size * 0.5, u_radius);
+    float fill = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
+    // Interior = shape shrunk by the border width; ring = fill - interior.
+    float interior = clamp(0.5 - (d + u_border) / fwidth(d), 0.0, 1.0);
+    float ring = clamp(fill - interior, 0.0, 1.0);
+    vec3 rgb = mix(u_color.rgb, u_border_color.rgb, ring);
+    float a = mix(u_color.a, u_border_color.a, ring) * fill * alpha;
+    gl_FragColor = vec4(rgb * a, a);
 }
 "#;
 
@@ -231,6 +269,8 @@ pub struct Gpu {
     pub rounded: GlesPixelProgram,
     /// Top-only rounded-rect shader, for SSD titlebars.
     pub rounded_top: GlesPixelProgram,
+    /// Rounded-rect-with-border shader, for the dock.
+    pub bordered: GlesPixelProgram,
     /// Dock app icons (device-level, loaded once), one per DOCK_APPS entry.
     /// None = icon file missing -> a placeholder square is drawn.
     pub dock_icons: Vec<Option<TextureBuffer<GlesTexture>>>,
@@ -278,6 +318,7 @@ impl Gpu {
             renderer,
             rounded,
             rounded_top,
+            bordered,
             dock_icons,
             surfaces,
             text,
@@ -307,12 +348,14 @@ impl Gpu {
             Kind::Unspecified,
         );
         let dock = PixelShaderElement::new(
-            rounded.clone(),
+            bordered.clone(),
             Rectangle::from_loc_and_size((dock_x, dock_y), (DOCK_W, DOCK_H)),
             None,
             1.0,
             vec![
                 Uniform::new("u_color", DOCK_COLOR),
+                Uniform::new("u_border_color", DOCK_BORDER_COLOR),
+                Uniform::new("u_border", DOCK_BORDER_W),
                 Uniform::new("u_radius", DOCK_RADIUS),
                 Uniform::new("u_size", [DOCK_W as f32, DOCK_H as f32]),
             ],
@@ -921,6 +964,18 @@ fn open_device(
         ],
     )?;
 
+    // Dock shader: rounded body + highlight border.
+    let bordered = renderer.compile_custom_pixel_shader(
+        BORDERED_SHADER,
+        &[
+            UniformName::new("u_color", UniformType::_4f),
+            UniformName::new("u_border_color", UniformType::_4f),
+            UniformName::new("u_border", UniformType::_1f),
+            UniformName::new("u_radius", UniformType::_1f),
+            UniformName::new("u_size", UniformType::_2f),
+        ],
+    )?;
+
     // Dock icons (load once at device open).
     let dock_icons = DOCK_APPS
         .iter()
@@ -936,6 +991,7 @@ fn open_device(
             renderer,
             rounded,
             rounded_top,
+            bordered,
             dock_icons,
             surfaces: HashMap::new(),
             frames: 0,
