@@ -75,6 +75,19 @@ const CURSOR_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
 /// Left mouse button (evdev BTN_LEFT).
 const BTN_LEFT: u32 = 0x110;
 
+// --- macOS-style server-side decorations --------------------------------
+/// Titlebar height in px. Drawn above each toplevel's surface.
+const TITLEBAR_H: i32 = 28;
+const TITLEBAR_COLOR: [f32; 4] = [0.86, 0.86, 0.87, 1.0];
+const TITLEBAR_RADIUS: f32 = 10.0;
+/// Traffic-light buttons (close/min/max), left-aligned.
+const LIGHT_DIA: i32 = 13;
+const LIGHT_MARGIN: i32 = 12; // left padding to the first light
+const LIGHT_SPACING: i32 = 20; // distance between light left-edges
+const LIGHT_CLOSE: [f32; 4] = [1.0, 0.37, 0.34, 1.0]; // #FF5F57
+const LIGHT_MIN: [f32; 4] = [1.0, 0.74, 0.18, 1.0]; // #FEBC2E
+const LIGHT_MAX: [f32; 4] = [0.16, 0.78, 0.25, 1.0]; // #28C840
+
 /// Rounded-rectangle pixel shader (GLSL ES 100; no #version per smithay).
 /// Built-in uniforms: `size` (px), `alpha`. Custom: `u_color`, `u_radius`.
 /// `v_coords` is normalized [0,1] across the element.
@@ -99,6 +112,33 @@ void main() {
     float cov = 1.0 - smoothstep(-aa, aa, d);
     float a = u_color.a * cov * alpha;
     // smithay expects premultiplied alpha.
+    gl_FragColor = vec4(u_color.rgb * a, a);
+}
+"#;
+
+/// Like ROUNDED_SHADER but with independent top/bottom corner radii, so a
+/// titlebar can have rounded top corners and a square bottom that meets the
+/// window content. `v_coords.y == 0` is the top edge.
+const TOP_ROUNDED_SHADER: &str = r#"
+#extension GL_OES_standard_derivatives : enable
+precision mediump float;
+varying vec2 v_coords;
+uniform float alpha;
+uniform vec4 u_color;
+uniform float u_radius_top;
+uniform float u_radius_bottom;
+uniform vec2 u_size;
+
+void main() {
+    vec2 b = u_size * 0.5;
+    vec2 p = v_coords * u_size - b;
+    // p.y < 0.0 is the top half.
+    float r = p.y < 0.0 ? u_radius_top : u_radius_bottom;
+    vec2 q = abs(p) - b + r;
+    float d = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r;
+    float aa = fwidth(d);
+    float cov = 1.0 - smoothstep(-aa, aa, d);
+    float a = u_color.a * cov * alpha;
     gl_FragColor = vec4(u_color.rgb * a, a);
 }
 "#;
@@ -129,8 +169,10 @@ pub struct Gpu {
     pub compositor: ZenCompositor,
     /// Screen size in px (from the DRM mode).
     pub size: (i32, i32),
-    /// Compiled rounded-rect pixel shader, reused for bar + dock.
+    /// Compiled rounded-rect pixel shader, reused for bar + dock + lights.
     pub rounded: GlesPixelProgram,
+    /// Top-only rounded-rect shader, for SSD titlebars.
+    pub rounded_top: GlesPixelProgram,
     /// True while a page-flip is in flight (cleared on VBlank). Avoids queuing a
     /// second flip before the first completes.
     pub pending_flip: bool,
@@ -195,10 +237,47 @@ impl Gpu {
         ];
         let scale = Scale::from(1.0);
         for window in space.elements() {
-            let loc = space
-                .element_location(window)
-                .unwrap_or_default()
-                .to_physical_precise_round(1.0);
+            let loc_logical = space.element_location(window).unwrap_or_default();
+            let geo = window.geometry();
+
+            // macOS-style SSD: titlebar above the surface + traffic lights.
+            if geo.size.w > 0 {
+                let tx = loc_logical.x;
+                let ty = loc_logical.y - TITLEBAR_H;
+                let titlebar = PixelShaderElement::new(
+                    self.rounded_top.clone(),
+                    Rectangle::from_loc_and_size((tx, ty), (geo.size.w, TITLEBAR_H)),
+                    None,
+                    1.0,
+                    vec![
+                        Uniform::new("u_color", TITLEBAR_COLOR),
+                        Uniform::new("u_radius_top", TITLEBAR_RADIUS),
+                        Uniform::new("u_radius_bottom", 0.0f32),
+                        Uniform::new("u_size", [geo.size.w as f32, TITLEBAR_H as f32]),
+                    ],
+                    Kind::Unspecified,
+                );
+                let light_y = ty + (TITLEBAR_H - LIGHT_DIA) / 2;
+                for (i, color) in [LIGHT_CLOSE, LIGHT_MIN, LIGHT_MAX].into_iter().enumerate() {
+                    let lx = tx + LIGHT_MARGIN + i as i32 * LIGHT_SPACING;
+                    let light = PixelShaderElement::new(
+                        self.rounded.clone(),
+                        Rectangle::from_loc_and_size((lx, light_y), (LIGHT_DIA, LIGHT_DIA)),
+                        None,
+                        1.0,
+                        vec![
+                            Uniform::new("u_color", color),
+                            Uniform::new("u_radius", LIGHT_DIA as f32 / 2.0),
+                            Uniform::new("u_size", [LIGHT_DIA as f32, LIGHT_DIA as f32]),
+                        ],
+                        Kind::Unspecified,
+                    );
+                    elements.push(ZenElement::Ui(light));
+                }
+                elements.push(ZenElement::Ui(titlebar));
+            }
+
+            let loc = loc_logical.to_physical_precise_round(1.0);
             let rels = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
                 &mut self.renderer,
                 loc,
@@ -417,6 +496,64 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let button_state = event.state();
             if button_state == ButtonState::Pressed {
                 let loc = data.pointer_location;
+
+                // SSD titlebars live above the surface, outside the Space, so
+                // hit-test them manually before the normal surface focus path.
+                let deco = {
+                    let mut found = None;
+                    for window in data.space.elements() {
+                        let wl = data.space.element_location(window).unwrap_or_default();
+                        let gw = window.geometry().size.w;
+                        if gw <= 0 {
+                            continue;
+                        }
+                        let tb = Rectangle::from_loc_and_size(
+                            (wl.x, wl.y - TITLEBAR_H),
+                            (gw, TITLEBAR_H),
+                        );
+                        if tb.to_f64().contains(loc) {
+                            found = Some((window.clone(), wl));
+                            break;
+                        }
+                    }
+                    found
+                };
+                if let Some((window, wl)) = deco {
+                    if let Some(s) = window.toplevel().map(|t| t.wl_surface().clone()) {
+                        let keyboard = data.seat.get_keyboard().unwrap();
+                        keyboard.set_focus(data, Some(s), serial);
+                    }
+                    // First traffic light = close.
+                    let close = Rectangle::from_loc_and_size(
+                        (wl.x + LIGHT_MARGIN, wl.y - TITLEBAR_H + (TITLEBAR_H - LIGHT_DIA) / 2),
+                        (LIGHT_DIA, LIGHT_DIA),
+                    );
+                    if button == BTN_LEFT && close.to_f64().contains(loc) {
+                        if let Some(t) = window.toplevel() {
+                            t.send_close();
+                        }
+                    } else if button == BTN_LEFT {
+                        // Drag the titlebar to move (no modifier, macOS-style).
+                        data.move_grab = Some(MoveGrab {
+                            window,
+                            start_ptr: loc,
+                            start_win: wl,
+                        });
+                    }
+                    let pointer = data.seat.get_pointer().unwrap();
+                    pointer.button(
+                        data,
+                        &ButtonEvent {
+                            button,
+                            state: button_state,
+                            serial,
+                            time,
+                        },
+                    );
+                    pointer.frame(data);
+                    return;
+                }
+
                 let under = data.space.element_under(loc).map(|(w, p)| (w.clone(), p));
                 if let Some((window, win_loc)) = under {
                     let keyboard = data.seat.get_keyboard().unwrap();
@@ -521,6 +658,17 @@ fn open_gpu(
         ],
     )?;
 
+    // Titlebar shader with separate top/bottom radii.
+    let rounded_top = renderer.compile_custom_pixel_shader(
+        TOP_ROUNDED_SHADER,
+        &[
+            UniformName::new("u_color", UniformType::_4f),
+            UniformName::new("u_radius_top", UniformType::_1f),
+            UniformName::new("u_radius_bottom", UniformType::_1f),
+            UniformName::new("u_size", UniformType::_2f),
+        ],
+    )?;
+
     // --- pick a connected connector + its preferred mode --------------------
     let res = drm.resource_handles()?;
     let conn = res
@@ -595,6 +743,7 @@ fn open_gpu(
             compositor,
             size,
             rounded,
+            rounded_top,
             pending_flip: false,
             cursor_pos: (0, 0),
             wallpaper,

@@ -19,13 +19,15 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
 use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use crate::state::{ClientState, ZenState};
@@ -105,9 +107,15 @@ impl XdgShellHandler for ZenState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         tracing::info!("new toplevel window");
+        // Force server-side decorations up front, so clients that read the mode
+        // before binding xdg-decoration (or never bind) still drop their CSD.
+        surface.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
         let window = Window::new_wayland_window(surface);
-        // Place below the top bar (40px) so the whole window is visible.
-        self.space.map_element(window, (40, 40), false);
+        // Map below the top bar AND with room above for the SSD titlebar
+        // (top bar 30 + titlebar 28); the titlebar is drawn at surf_y - 28.
+        self.space.map_element(window, (60, 80), false);
         // Keyboard focus is set on commit (once the client is ready), not here.
     }
 
@@ -126,6 +134,32 @@ impl XdgShellHandler for ZenState {
     }
 }
 delegate_xdg_shell!(ZenState);
+
+impl XdgDecorationHandler for ZenState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // ZenOS draws decorations (macOS-style titlebar) — never client-side.
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        // Ignore the client's preference; always server-side.
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}
+delegate_xdg_decoration!(ZenState);
 
 impl SeatHandler for ZenState {
     type KeyboardFocus = WlSurface;
