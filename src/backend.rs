@@ -35,7 +35,8 @@ use smithay::utils::{Scale, Transform};
 use smithay::backend::renderer::gles::{
     GlesPixelProgram, GlesRenderer, GlesTexProgram, GlesTexture, Uniform, UniformName, UniformType,
 };
-use smithay::backend::renderer::Color32F;
+use smithay::backend::renderer::damage::OutputDamageTracker;
+use smithay::backend::renderer::{Bind, Color32F, Offscreen};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
@@ -223,14 +224,12 @@ void main() {
 }
 "#;
 
-/// Backdrop blur factor: the wallpaper is pre-blurred at 1/N resolution on the
-/// CPU, then sampled (upscaled) under the dock. Bigger = blurrier + cheaper.
-const BLUR_DOWNSCALE: i32 = 4;
-const BLUR_SIGMA: f32 = 10.0;
+/// Backdrop blur sampling step in px (9x9 kernel reaches ~4*BLUR_STEP px).
+const BLUR_STEP: f32 = 3.0;
 
-/// Texture shader: samples the (pre-blurred) wallpaper and masks it to a rounded
-/// rect. Used to draw the frosted backdrop behind the dock. Must mirror
-/// smithay's builtin texture shader structure (`//_DEFINES_`, EXTERNAL/NO_ALPHA).
+/// Texture shader for the frosted dock backdrop: gaussian-blurs the sampled
+/// scene texture (9x9 kernel stepped by u_texel) and masks it to a rounded rect.
+/// Must mirror smithay's builtin texture shader (`//_DEFINES_`, EXTERNAL).
 const BLUR_MASK_SHADER: &str = r#"#version 100
 //_DEFINES_
 #if defined(EXTERNAL)
@@ -251,6 +250,7 @@ uniform float alpha;
 varying vec2 v_coords;
 uniform float u_radius;
 uniform vec2 u_size;
+uniform vec2 u_texel;
 
 float sd_rounded_box(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - b + r;
@@ -258,16 +258,23 @@ float sd_rounded_box(vec2 p, vec2 b, float r) {
 }
 
 void main() {
-    vec4 c = texture2D(tex, v_coords);
-#if defined(NO_ALPHA)
-    c = vec4(c.rgb, 1.0);
-#endif
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0;
+    for (int yy = -4; yy <= 4; yy++) {
+        for (int xx = -4; xx <= 4; xx++) {
+            float fx = float(xx);
+            float fy = float(yy);
+            float wgt = exp(-(fx * fx + fy * fy) / 8.0);
+            acc += texture2D(tex, v_coords + vec2(fx, fy) * u_texel).rgb * wgt;
+            wsum += wgt;
+        }
+    }
+    vec3 col = acc / wsum;
     vec2 p = v_coords * u_size - u_size * 0.5;
     float d = sd_rounded_box(p, u_size * 0.5, u_radius);
     float cov = clamp(0.5 - d / fwidth(d), 0.0, 1.0);
-    // Respect the source alpha (icons have transparent areas; wallpaper is opaque).
-    float a = c.a * cov * alpha;
-    gl_FragColor = vec4(c.rgb * a, a);
+    float a = cov * alpha;
+    gl_FragColor = vec4(col * a, a);
 }
 "#;
 
@@ -374,8 +381,12 @@ pub struct Surface {
     pub pending_flip: bool,
     /// Fullscreen wallpaper, pre-scaled to this output. None = flat CLEAR bg.
     pub wallpaper: Option<TextureBuffer<GlesTexture>>,
-    /// Pre-blurred wallpaper at 1/BLUR_DOWNSCALE res, for the dock backdrop.
-    pub wallpaper_blur: Option<TextureBuffer<GlesTexture>>,
+    /// Offscreen texture holding the composed scene (wallpaper + windows + bar).
+    /// Rendered each frame, then drawn fullscreen on the scanout and
+    /// sampled+blurred for the dock's frosted backdrop.
+    pub scene_tex: GlesTexture,
+    /// Damage tracker for the offscreen scene pass.
+    pub scene_damage: OutputDamageTracker,
 }
 
 /// One GPU: the DRM device, GBM allocator, GLES renderer, shaders, and one
@@ -407,30 +418,36 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Render every output that isn't mid-flip.
-    pub fn render_all(&mut self, space: &Space<Window>, cursor: (i32, i32)) {
+    /// Render every output that isn't mid-flip. Returns true if all outputs were
+    /// rendered (none skipped for an in-flight flip), so the caller can clear the
+    /// dirty flag.
+    pub fn render_all(&mut self, space: &Space<Window>, cursor: (i32, i32)) -> bool {
         let crtcs: Vec<crtc::Handle> = self.surfaces.keys().copied().collect();
+        let mut all_done = true;
         for crtc in crtcs {
             match self.render_surface(crtc, space, cursor) {
                 Ok(true) => self.frames += 1,
-                Ok(false) => {}
+                Ok(false) => all_done = false, // mid-flip; retry after its VBlank
                 Err(e) => tracing::error!("render surface failed: {e}"),
             }
         }
-        // Once a second, report flips/s (≈ FPS of the busiest output). With
-        // event-driven rendering this is 0 when idle, ~refresh under activity.
         let elapsed = self.fps_since.elapsed();
         if elapsed.as_secs() >= 1 {
             tracing::info!("{} flips/s", self.frames as f64 / elapsed.as_secs_f64());
             self.frames = 0;
             self.fps_since = std::time::Instant::now();
         }
+        all_done
     }
 
-    /// Render one output: client windows + SSD titlebars below, ZenOS UI on top,
-    /// over the wallpaper/clear background, then page-flip. Elements are placed
-    /// in this output's local coordinates (global coords minus the output's
-    /// location). Returns true if a frame was queued (had damage).
+    /// Render one output in two passes:
+    ///  1. Compose the scene (wallpaper + windows + SSD + bar + clock) into an
+    ///     offscreen texture.
+    ///  2. Scanout: draw that scene fullscreen, then the dock — whose frosted
+    ///     backdrop samples + blurs the scene under it (so windows behind the
+    ///     dock are blurred too) — then the cursor.
+    /// Returns true if a frame was queued. Only called when something changed
+    /// (the caller's dirty flag), so the offscreen is fully re-composed each time.
     fn render_surface(
         &mut self,
         crtc: crtc::Handle,
@@ -454,13 +471,42 @@ impl Gpu {
         if surface.pending_flip {
             return Ok(false);
         }
-        let (w, h) = surface.size;
-        let (ox, oy) = surface.location;
+        let Surface {
+            scene_tex,
+            scene_damage,
+            compositor,
+            wallpaper,
+            size,
+            location,
+            pending_flip,
+            ..
+        } = surface;
+        let (w, h) = *size;
+        let (ox, oy) = *location;
 
         let dw = dock_width(DOCK_APPS.len());
         let dock_x = (w - dw) / 2;
         let dock_y = h - DOCK_H - DOCK_MARGIN;
-        let bar = PixelShaderElement::new(
+        let scale = Scale::from(1.0);
+
+        // --- Pass 1: compose the scene into the offscreen texture --------------
+        let mut scene: Vec<ZenElement> = Vec::new();
+
+        // Top-bar clock, right-aligned.
+        let now = chrono::Local::now().format("%H:%M").to_string();
+        let cw = text.measure(renderer, &now, BAR_TEXT_PX);
+        let clock = text.text(
+            renderer,
+            &now,
+            w - cw - 14,
+            BAR_H / 2 + (BAR_TEXT_PX as i32) / 3,
+            BAR_TEXT_PX,
+            BAR_TEXT_COLOR,
+        );
+        scene.extend(clock.into_iter().map(ZenElement::Texture));
+
+        // Top bar.
+        scene.push(ZenElement::Ui(PixelShaderElement::new(
             rounded.clone(),
             Rectangle::from_loc_and_size((0, 0), (w, BAR_H)),
             None,
@@ -471,21 +517,100 @@ impl Gpu {
                 Uniform::new("u_size", [w as f32, BAR_H as f32]),
             ],
             Kind::Unspecified,
-        );
-        let dock = PixelShaderElement::new(
-            bordered.clone(),
-            Rectangle::from_loc_and_size((dock_x, dock_y), (dw, DOCK_H)),
-            None,
-            1.0,
-            vec![
-                Uniform::new("u_color", DOCK_COLOR),
-                Uniform::new("u_border_color", DOCK_BORDER_COLOR),
-                Uniform::new("u_border", DOCK_BORDER_W),
-                Uniform::new("u_radius", DOCK_RADIUS),
-                Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
-            ],
-            Kind::Unspecified,
-        );
+        )));
+
+        for window in space.elements() {
+            let g = space.element_location(window).unwrap_or_default();
+            let lx = g.x - ox;
+            let ly = g.y - oy;
+            let geo = window.geometry();
+
+            if geo.size.w > 0 {
+                let tx = lx;
+                let ty = ly - TITLEBAR_H;
+                let titlebar = PixelShaderElement::new(
+                    rounded_top.clone(),
+                    Rectangle::from_loc_and_size((tx, ty), (geo.size.w, TITLEBAR_H)),
+                    None,
+                    1.0,
+                    vec![
+                        Uniform::new("u_color", TITLEBAR_COLOR),
+                        Uniform::new("u_radius_top", TITLEBAR_RADIUS),
+                        Uniform::new("u_radius_bottom", 0.0f32),
+                        Uniform::new("u_size", [geo.size.w as f32, TITLEBAR_H as f32]),
+                    ],
+                    Kind::Unspecified,
+                );
+                let light_y = ty + (TITLEBAR_H - LIGHT_DIA) / 2;
+                for (i, color) in [LIGHT_CLOSE, LIGHT_MIN, LIGHT_MAX].into_iter().enumerate() {
+                    let lcx = tx + LIGHT_MARGIN + i as i32 * LIGHT_SPACING;
+                    scene.push(ZenElement::Ui(PixelShaderElement::new(
+                        rounded.clone(),
+                        Rectangle::from_loc_and_size((lcx, light_y), (LIGHT_DIA, LIGHT_DIA)),
+                        None,
+                        1.0,
+                        vec![
+                            Uniform::new("u_color", color),
+                            Uniform::new("u_radius", LIGHT_DIA as f32 / 2.0),
+                            Uniform::new("u_size", [LIGHT_DIA as f32, LIGHT_DIA as f32]),
+                        ],
+                        Kind::Unspecified,
+                    )));
+                }
+
+                let title = window
+                    .toplevel()
+                    .and_then(|t| {
+                        with_states(t.wl_surface(), |states| {
+                            states
+                                .data_map
+                                .get::<XdgToplevelSurfaceData>()
+                                .and_then(|d| d.lock().unwrap().title.clone())
+                        })
+                    })
+                    .unwrap_or_default();
+                if !title.is_empty() {
+                    let tw_text = text.measure(renderer, &title, TITLE_PX);
+                    let tx_text = tx + (geo.size.w - tw_text) / 2;
+                    let bl = ty + TITLEBAR_H / 2 + (TITLE_PX as i32) / 3;
+                    let glyphs = text.text(renderer, &title, tx_text, bl, TITLE_PX, TITLE_COLOR);
+                    scene.extend(glyphs.into_iter().map(ZenElement::Texture));
+                }
+
+                scene.push(ZenElement::Ui(titlebar));
+            }
+
+            let loc = Point::<i32, Logical>::from((lx, ly)).to_physical_precise_round(1.0);
+            let rels = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                renderer,
+                loc,
+                scale,
+                1.0,
+            );
+            scene.extend(rels.into_iter().map(ZenElement::Window));
+        }
+
+        // Wallpaper at the very bottom of the scene.
+        if let Some(wp) = wallpaper {
+            scene.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
+                Point::from((0.0, 0.0)),
+                wp,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )));
+        }
+
+        // Render the scene into scene_tex.
+        {
+            let mut fb = renderer.bind(&mut *scene_tex)?;
+            scene_damage.render_output(renderer, &mut fb, 0, &scene, Color32F::from(CLEAR))?;
+        }
+
+        // --- Pass 2: scanout — scene fullscreen + dock (frosted) + cursor ------
+        let scene_buf =
+            TextureBuffer::from_texture(&*renderer, scene_tex.clone(), 1, Transform::Normal, None);
 
         let cursor_el = PixelShaderElement::new(
             rounded.clone(),
@@ -500,41 +625,22 @@ impl Gpu {
             Kind::Unspecified,
         );
 
-        // Front-to-back: cursor, then text (clock), UI bars, windows.
-        let mut elements: Vec<ZenElement> = vec![ZenElement::Ui(cursor_el)];
+        // Front-to-back overlay.
+        let mut overlay: Vec<ZenElement> = vec![ZenElement::Ui(cursor_el)];
 
-        // Top-bar clock, right-aligned.
-        let now = chrono::Local::now().format("%H:%M").to_string();
-        let cw = text.measure(renderer, &now, BAR_TEXT_PX);
-        let clock = text.text(
-            renderer,
-            &now,
-            w - cw - 14,
-            BAR_H / 2 + (BAR_TEXT_PX as i32) / 3,
-            BAR_TEXT_PX,
-            BAR_TEXT_COLOR,
-        );
-        elements.extend(clock.into_iter().map(ZenElement::Texture));
-
-        elements.push(ZenElement::Ui(bar));
-
-        // Dock app icons (in front of the dock background, pushed before it).
-        // macOS-style hover magnification: icons near the cursor scale up and
-        // grow upward from the dock baseline. All icons get a rounded (squircle)
-        // mask for a uniform look.
+        // Dock icons + separators (with hover magnification).
         let cursor_lx = cursor.0 - ox;
         let cursor_ly = cursor.1 - oy;
-        let hover = cursor_ly >= dock_y - 40; // pointer over/just above the dock
-        let baseline = dock_y + DOCK_H - DOCK_PAD_Y; // icon bottom edge
+        let hover = cursor_ly >= dock_y - 40;
+        let baseline = dock_y + DOCK_H - DOCK_PAD_Y;
         for (i, app) in DOCK_APPS.iter().enumerate() {
             let (bx, _) = dock_icon_pos(w, h, i, DOCK_APPS.len());
 
-            // Group separator (thin vertical line centered in the gap before).
             if app.sep_before && i > 0 {
                 let sh = ICON_SIZE - 16;
                 let sx = bx - ICON_GAP / 2;
                 let sy = baseline - ICON_SIZE + 8;
-                elements.push(ZenElement::Ui(PixelShaderElement::new(
+                overlay.push(ZenElement::Ui(PixelShaderElement::new(
                     rounded.clone(),
                     Rectangle::from_loc_and_size((sx, sy), (2, sh)),
                     None,
@@ -561,14 +667,11 @@ impl Gpu {
             let radius = size as f32 * ICON_RADIUS_FRAC;
             match dock_icons.get(i) {
                 Some(Some(tex)) => {
-                    // Real icons already have rounded/transparent art — draw
-                    // them directly. src MUST be the full texture: with `size`
-                    // set and src=None, smithay samples only a size×size corner.
                     let src = Rectangle::<f64, Logical>::from_loc_and_size(
                         (0.0, 0.0),
                         (ICON_TEX as f64, ICON_TEX as f64),
                     );
-                    elements.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
+                    overlay.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
                         Point::from((x as f64, y as f64)),
                         tex,
                         None,
@@ -578,8 +681,7 @@ impl Gpu {
                     )));
                 }
                 _ => {
-                    // Colored rounded-square placeholder when the icon is missing.
-                    elements.push(ZenElement::Ui(PixelShaderElement::new(
+                    overlay.push(ZenElement::Ui(PixelShaderElement::new(
                         rounded.clone(),
                         Rectangle::from_loc_and_size((x, y), (size, size)),
                         None,
@@ -595,134 +697,66 @@ impl Gpu {
             }
         }
 
-        elements.push(ZenElement::Ui(dock));
+        // Dock tint.
+        overlay.push(ZenElement::Ui(PixelShaderElement::new(
+            bordered.clone(),
+            Rectangle::from_loc_and_size((dock_x, dock_y), (dw, DOCK_H)),
+            None,
+            1.0,
+            vec![
+                Uniform::new("u_color", DOCK_COLOR),
+                Uniform::new("u_border_color", DOCK_BORDER_COLOR),
+                Uniform::new("u_border", DOCK_BORDER_W),
+                Uniform::new("u_radius", DOCK_RADIUS),
+                Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
+            ],
+            Kind::Unspecified,
+        )));
 
-        // Frosted backdrop: blurred wallpaper under the dock, rounded-masked.
-        // Behind the translucent dock tint, in front of windows/wallpaper.
-        if let Some(blur) = &surface.wallpaper_blur {
-            let bd = BLUR_DOWNSCALE as f64;
-            let src = Rectangle::<f64, Logical>::from_loc_and_size(
-                (dock_x as f64 / bd, dock_y as f64 / bd),
-                (dw as f64 / bd, DOCK_H as f64 / bd),
-            );
-            let inner = TextureRenderElement::from_texture_buffer(
-                Point::from((dock_x as f64, dock_y as f64)),
-                blur,
-                None,
-                Some(src),
-                Some(Size::from((dw, DOCK_H))),
-                Kind::Unspecified,
-            );
-            let backdrop = TextureShaderElement::new(
-                inner,
-                blur_mask.clone(),
-                vec![
-                    Uniform::new("u_radius", DOCK_RADIUS),
-                    Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
-                ],
-            );
-            elements.push(ZenElement::Blur(backdrop));
-        }
-        let scale = Scale::from(1.0);
-        for window in space.elements() {
-            let g = space.element_location(window).unwrap_or_default();
-            let lx = g.x - ox;
-            let ly = g.y - oy;
-            let geo = window.geometry();
+        // Frosted backdrop: blur the scene under the dock, rounded-masked.
+        let src = Rectangle::<f64, Logical>::from_loc_and_size(
+            (dock_x as f64, dock_y as f64),
+            (dw as f64, DOCK_H as f64),
+        );
+        let inner = TextureRenderElement::from_texture_buffer(
+            Point::from((dock_x as f64, dock_y as f64)),
+            &scene_buf,
+            None,
+            Some(src),
+            Some(Size::from((dw, DOCK_H))),
+            Kind::Unspecified,
+        );
+        overlay.push(ZenElement::Blur(TextureShaderElement::new(
+            inner,
+            blur_mask.clone(),
+            vec![
+                Uniform::new("u_radius", DOCK_RADIUS),
+                Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
+                Uniform::new("u_texel", [BLUR_STEP / dw as f32, BLUR_STEP / DOCK_H as f32]),
+            ],
+        )));
 
-            // macOS-style SSD: titlebar above the surface + traffic lights.
-            if geo.size.w > 0 {
-                let tx = lx;
-                let ty = ly - TITLEBAR_H;
-                let titlebar = PixelShaderElement::new(
-                    rounded_top.clone(),
-                    Rectangle::from_loc_and_size((tx, ty), (geo.size.w, TITLEBAR_H)),
-                    None,
-                    1.0,
-                    vec![
-                        Uniform::new("u_color", TITLEBAR_COLOR),
-                        Uniform::new("u_radius_top", TITLEBAR_RADIUS),
-                        Uniform::new("u_radius_bottom", 0.0f32),
-                        Uniform::new("u_size", [geo.size.w as f32, TITLEBAR_H as f32]),
-                    ],
-                    Kind::Unspecified,
-                );
-                let light_y = ty + (TITLEBAR_H - LIGHT_DIA) / 2;
-                for (i, color) in [LIGHT_CLOSE, LIGHT_MIN, LIGHT_MAX].into_iter().enumerate() {
-                    let lcx = tx + LIGHT_MARGIN + i as i32 * LIGHT_SPACING;
-                    let light = PixelShaderElement::new(
-                        rounded.clone(),
-                        Rectangle::from_loc_and_size((lcx, light_y), (LIGHT_DIA, LIGHT_DIA)),
-                        None,
-                        1.0,
-                        vec![
-                            Uniform::new("u_color", color),
-                            Uniform::new("u_radius", LIGHT_DIA as f32 / 2.0),
-                            Uniform::new("u_size", [LIGHT_DIA as f32, LIGHT_DIA as f32]),
-                        ],
-                        Kind::Unspecified,
-                    );
-                    elements.push(ZenElement::Ui(light));
-                }
+        // Composed scene, fullscreen, at the bottom.
+        overlay.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
+            Point::from((0.0, 0.0)),
+            &scene_buf,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )));
 
-                // Centered window title (in front of the titlebar).
-                let title = window
-                    .toplevel()
-                    .and_then(|t| {
-                        with_states(t.wl_surface(), |states| {
-                            states
-                                .data_map
-                                .get::<XdgToplevelSurfaceData>()
-                                .and_then(|d| d.lock().unwrap().title.clone())
-                        })
-                    })
-                    .unwrap_or_default();
-                if !title.is_empty() {
-                    let tw_text = text.measure(renderer, &title, TITLE_PX);
-                    let tx_text = tx + (geo.size.w - tw_text) / 2;
-                    let baseline = ty + TITLEBAR_H / 2 + (TITLE_PX as i32) / 3;
-                    let glyphs = text.text(renderer, &title, tx_text, baseline, TITLE_PX, TITLE_COLOR);
-                    elements.extend(glyphs.into_iter().map(ZenElement::Texture));
-                }
-
-                elements.push(ZenElement::Ui(titlebar));
-            }
-
-            let loc = Point::<i32, Logical>::from((lx, ly)).to_physical_precise_round(1.0);
-            let rels = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                renderer,
-                loc,
-                scale,
-                1.0,
-            );
-            elements.extend(rels.into_iter().map(ZenElement::Window));
-        }
-
-        // Wallpaper at the very bottom (drawn behind windows + UI). Opaque, so
-        // it hides the CLEAR background entirely.
-        if let Some(wp) = &surface.wallpaper {
-            let element = TextureRenderElement::from_texture_buffer(
-                Point::from((0.0, 0.0)),
-                wp,
-                None,
-                None,
-                None,
-                Kind::Unspecified,
-            );
-            elements.push(ZenElement::Texture(element));
-        }
-
-        let res = surface.compositor.render_frame::<_, ZenElement>(
+        let res = compositor.render_frame::<_, ZenElement>(
             renderer,
-            &elements,
+            &overlay,
             Color32F::from(CLEAR),
             FrameFlags::DEFAULT,
         )?;
         if res.is_empty {
-            return Ok(false); // no damage -> nothing to flip
+            return Ok(false);
         }
-        surface.compositor.queue_frame(())?;
-        surface.pending_flip = true;
+        compositor.queue_frame(())?;
+        *pending_flip = true;
         Ok(true)
     }
 }
@@ -858,6 +892,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 data.gpu = Some(gpu);
             }
+            data.dirty = true;
             data.render();
         }
         UdevEvent::Added { device_id, .. } => tracing::debug!("udev add {device_id}"),
@@ -871,7 +906,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .udev_assign_seat(&seat_name)
         .map_err(|_| "libinput udev_assign_seat failed")?;
     let libinput_backend = LibinputInputBackend::new(libinput);
-    handle.insert_source(libinput_backend, move |event, _, data| match event {
+    handle.insert_source(libinput_backend, move |event, _, data| {
+        // Any input event means something will visibly change next render.
+        data.dirty = true;
+        match event {
         InputEvent::Keyboard { event } => {
             let keyboard = data.seat.get_keyboard().unwrap();
             let serial = SERIAL_COUNTER.next_serial();
@@ -1063,12 +1101,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             pointer.frame(data);
         }
         _ => {}
+        }
     })?;
 
     // 1Hz tick so the clock redraws even when otherwise idle (minute rollover).
     handle.insert_source(
         Timer::from_duration(Duration::from_secs(1)),
         |_, _, data: &mut ZenState| {
+            data.dirty = true; // clock may have ticked over
             data.render();
             TimeoutAction::ToDuration(Duration::from_secs(1))
         },
@@ -1179,6 +1219,7 @@ fn open_device(
         &[
             UniformName::new("u_radius", UniformType::_1f),
             UniformName::new("u_size", UniformType::_2f),
+            UniformName::new("u_texel", UniformType::_2f),
         ],
     )?;
 
@@ -1329,7 +1370,10 @@ fn create_surface(
 
     let size = (mode.size().0 as i32, mode.size().1 as i32);
     let wallpaper = load_wallpaper(&mut gpu.renderer, size.0, size.1);
-    let wallpaper_blur = load_wallpaper_blur(&mut gpu.renderer, size.0, size.1);
+    let scene_tex = gpu
+        .renderer
+        .create_buffer(Fourcc::Abgr8888, Size::from((size.0, size.1)))?;
+    let scene_damage = OutputDamageTracker::new((size.0, size.1), 1.0, Transform::Normal);
     let global = output.create_global::<ZenState>(dh);
 
     tracing::info!(
@@ -1350,7 +1394,8 @@ fn create_surface(
             location: (0, 0),
             pending_flip: false,
             wallpaper,
-            wallpaper_blur,
+            scene_tex,
+            scene_damage,
         },
     );
     Ok(())
@@ -1488,32 +1533,4 @@ fn load_wallpaper(
             None
         }
     }
-}
-
-/// Load + heavily blur the wallpaper at 1/BLUR_DOWNSCALE resolution, for the
-/// dock's frosted backdrop. Downscaling first makes the blur cheap and stronger.
-fn load_wallpaper_blur(
-    renderer: &mut GlesRenderer,
-    w: i32,
-    h: i32,
-) -> Option<TextureBuffer<GlesTexture>> {
-    let path = std::env::var("ZENOS_WALLPAPER")
-        .unwrap_or_else(|_| "/usr/local/share/zenos/wallpaper.png".to_string());
-    let img = image::open(&path).ok()?;
-    let bw = (w / BLUR_DOWNSCALE).max(1);
-    let bh = (h / BLUR_DOWNSCALE).max(1);
-    let small = img.resize_to_fill(bw as u32, bh as u32, image::imageops::FilterType::Triangle);
-    let blurred = small.blur(BLUR_SIGMA);
-    let rgba = blurred.to_rgba8();
-    TextureBuffer::from_memory(
-        renderer,
-        rgba.as_raw(),
-        Fourcc::Abgr8888,
-        (bw, bh),
-        false,
-        1,
-        Transform::Normal,
-        None,
-    )
-    .ok()
 }

@@ -85,6 +85,8 @@ impl CompositorHandler for ZenState {
             }
         }
         self.popups.commit(surface);
+        // A client drew something — recompose (also reblurs the dock backdrop).
+        self.dirty = true;
     }
 }
 delegate_compositor!(ZenState);
@@ -116,6 +118,7 @@ impl XdgShellHandler for ZenState {
         // Map below the top bar AND with room above for the SSD titlebar
         // (top bar 30 + titlebar 28); the titlebar is drawn at surf_y - 28.
         self.space.map_element(window, (60, 80), false);
+        self.dirty = true;
         // Keyboard focus is set on commit (once the client is ready), not here.
     }
 

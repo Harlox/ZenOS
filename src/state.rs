@@ -22,6 +22,10 @@ use crate::backend::Gpu;
 pub struct ZenState {
     pub running: bool,
     pub start_time: Instant,
+    /// Set when anything visible changed (input, client commit, hotplug, clock).
+    /// `render` only composes + flips when dirty, then clears it — this is what
+    /// keeps the 2-pass renderer from flipping every VBlank.
+    pub dirty: bool,
 
     // --- backend ---
     pub session: LibSeatSession,
@@ -77,6 +81,7 @@ impl ZenState {
         Self {
             running: true,
             start_time: Instant::now(),
+            dirty: true,
             session,
             gpu: None,
             display_handle: dh,
@@ -96,11 +101,14 @@ impl ZenState {
         }
     }
 
-    /// Render the current frame via the GPU (split borrows: gpu + space).
-    /// Skips if a flip is already pending; only marks pending when one is
-    /// queued (i.e. there was damage). Does NOT send frame callbacks — those
-    /// go out on VBlank so clients are throttled to the monitor refresh.
+    /// Compose + flip, but only when something changed (`dirty`). The 2-pass
+    /// renderer fully re-composes each call, so we gate on dirty to avoid
+    /// flipping every VBlank. Does NOT send frame callbacks — those go out on
+    /// VBlank so clients are throttled to the monitor refresh.
     pub fn render(&mut self) {
+        if !self.dirty {
+            return;
+        }
         let Self {
             gpu,
             space,
@@ -110,7 +118,11 @@ impl ZenState {
         let Some(gpu) = gpu else { return };
 
         let cursor = (pointer_location.x as i32, pointer_location.y as i32);
-        gpu.render_all(space, cursor);
+        // Clear dirty only if every output was rendered (none mid-flip); a
+        // skipped output retries on its next VBlank-driven render.
+        if gpu.render_all(space, cursor) {
+            self.dirty = false;
+        }
     }
 
     /// Tell clients they may draw the next frame. Called once per VBlank, so a
