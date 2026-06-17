@@ -819,29 +819,112 @@ impl Gpu {
             return Ok(false);
         }
 
-        // F2 screenshot: render the base scene directly into a readable
-        // offscreen texture. Do not render `overlay` here: it samples scene_tex
-        // for the frosted dock and can read back as blank on some GLES drivers.
+        // F2 screenshot: render into a readable offscreen texture. The live
+        // overlay samples scene_tex for the frosted dock; keep the screenshot
+        // path simpler so readback stays reliable across GLES drivers.
         if shot {
+            let mut shot_elements: Vec<ZenElement> = Vec::new();
+            shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
+                rounded.clone(),
+                Rectangle::from_loc_and_size((cursor.0 - ox, cursor.1 - oy), (CURSOR_SIZE, CURSOR_SIZE)),
+                None,
+                1.0,
+                vec![
+                    Uniform::new("u_color", CURSOR_COLOR),
+                    Uniform::new("u_radius", 2.0f32),
+                    Uniform::new("u_size", [CURSOR_SIZE as f32, CURSOR_SIZE as f32]),
+                ],
+                Kind::Unspecified,
+            )));
+            for (i, app) in DOCK_APPS.iter().enumerate() {
+                let (bx, _) = dock_icon_pos(w, h, i, DOCK_APPS.len());
+                if app.sep_before && i > 0 {
+                    let sh = ICON_SIZE - 16;
+                    let sx = bx - ICON_GAP / 2;
+                    let sy = baseline - ICON_SIZE + 8;
+                    shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
+                        rounded.clone(),
+                        Rectangle::from_loc_and_size((sx, sy), (2, sh)),
+                        None,
+                        1.0,
+                        vec![
+                            Uniform::new("u_color", SEP_COLOR),
+                            Uniform::new("u_radius", 1.0f32),
+                            Uniform::new("u_size", [2.0f32, sh as f32]),
+                        ],
+                        Kind::Unspecified,
+                    )));
+                }
+
+                let icon_cx = bx + ICON_SIZE / 2;
+                let mag = if hover {
+                    let dist = (cursor_lx - icon_cx).abs() as f32;
+                    1.0 + (MAG_MAX - 1.0) * (1.0 - (dist / MAG_RADIUS)).max(0.0)
+                } else {
+                    1.0
+                };
+                let size = (ICON_SIZE as f32 * mag).round() as i32;
+                let x = icon_cx - size / 2;
+                let y = baseline - size;
+                match dock_icons.get(i) {
+                    Some(Some(tex)) => {
+                        let src = Rectangle::<f64, Logical>::from_loc_and_size(
+                            (0.0, 0.0),
+                            (ICON_TEX as f64, ICON_TEX as f64),
+                        );
+                        shot_elements.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
+                            Point::from((x as f64, y as f64)),
+                            tex,
+                            None,
+                            Some(src),
+                            Some(Size::from((size, size))),
+                            Kind::Unspecified,
+                        )));
+                    }
+                    _ => {
+                        shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
+                            rounded.clone(),
+                            Rectangle::from_loc_and_size((x, y), (size, size)),
+                            None,
+                            1.0,
+                            vec![
+                                Uniform::new("u_color", app.placeholder),
+                                Uniform::new("u_radius", size as f32 * ICON_RADIUS_FRAC),
+                                Uniform::new("u_size", [size as f32, size as f32]),
+                            ],
+                            Kind::Unspecified,
+                        )));
+                    }
+                }
+            }
+            shot_elements.push(ZenElement::Ui(PixelShaderElement::new(
+                bordered.clone(),
+                Rectangle::from_loc_and_size((dock_x, dock_y), (dw, DOCK_H)),
+                None,
+                1.0,
+                vec![
+                    Uniform::new("u_color", DOCK_COLOR),
+                    Uniform::new("u_border_color", DOCK_BORDER_COLOR),
+                    Uniform::new("u_border", DOCK_BORDER_W),
+                    Uniform::new("u_radius", DOCK_RADIUS),
+                    Uniform::new("u_size", [dw as f32, DOCK_H as f32]),
+                ],
+                Kind::Unspecified,
+            )));
+            shot_elements.extend(scene);
+
             let mut capture = || -> Result<(), Box<dyn std::error::Error>> {
                 let mut shot_tex: GlesTexture =
                     renderer.create_buffer(Fourcc::Abgr8888, Size::from((w, h)))?;
                 let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
                 let mut fb = renderer.bind(&mut shot_tex)?;
-                tracker.render_output(renderer, &mut fb, 0, &scene, Color32F::from(CLEAR))?;
+                tracker.render_output(renderer, &mut fb, 0, &shot_elements, Color32F::from(CLEAR))?;
                 let region = Rectangle::from_loc_and_size((0, 0), (w, h));
                 let mapping = renderer.copy_framebuffer(&fb, region, Fourcc::Abgr8888)?;
                 let bytes = renderer.map_texture(&mapping)?;
-                let stride = w as usize * 4;
-                let mut flipped = vec![0u8; bytes.len()];
-                for y in 0..h as usize {
-                    let src = y * stride;
-                    let dst = (h as usize - 1 - y) * stride;
-                    flipped[dst..dst + stride].copy_from_slice(&bytes[src..src + stride]);
-                }
                 image::save_buffer(
                     "/tmp/zenos-shot.png",
-                    &flipped,
+                    bytes,
                     w as u32,
                     h as u32,
                     image::ExtendedColorType::Rgba8,
