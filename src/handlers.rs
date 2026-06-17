@@ -61,7 +61,8 @@ impl CompositorHandler for ZenState {
                 // Center the window once, on its first sized commit; after that
                 // the user owns its position (don't yank it back to center).
                 let geo = window.geometry().size;
-                if geo.w > 0 && geo.h > 0 && self.placed.insert(root.clone()) {
+                let first = geo.w > 0 && geo.h > 0 && self.placed.insert(root.clone());
+                if first {
                     let center = self
                         .space
                         .outputs()
@@ -93,11 +94,11 @@ impl CompositorHandler for ZenState {
                         toplevel.send_configure();
                     }
                 }
-                // (Re)assert keyboard focus now that the window is mapped, so
-                // typed keys actually reach it. set_focus is a no-op if already
-                // focused.
-                if let Some(keyboard) = self.seat.get_keyboard() {
-                    if keyboard.current_focus().as_ref() != Some(&root) {
+                // Focus the window only on its first sized commit. Re-focusing on
+                // every commit let background windows (cursor blink, frame
+                // callbacks) steal focus, leaking typed keys into all of them.
+                if first {
+                    if let Some(keyboard) = self.seat.get_keyboard() {
                         let serial = SERIAL_COUNTER.next_serial();
                         keyboard.set_focus(self, Some(root.clone()), serial);
                     }
@@ -152,6 +153,18 @@ impl XdgShellHandler for ZenState {
             .cloned();
         if let Some(window) = window {
             self.space.unmap_elem(&window);
+        }
+        // Hand keyboard focus to the new topmost window (last = top), so closing
+        // the focused window doesn't leave nothing focused.
+        let next = self
+            .space
+            .elements()
+            .last()
+            .and_then(|w| w.toplevel())
+            .map(|t| t.wl_surface().clone());
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let serial = SERIAL_COUNTER.next_serial();
+            keyboard.set_focus(self, next, serial);
         }
         self.dirty = true;
     }

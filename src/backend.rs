@@ -308,7 +308,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // hit-test them manually before the normal surface focus path.
                 let deco = {
                     let mut found = None;
-                    for window in data.space.elements() {
+                    // Topmost first, so overlapping titlebars hit-test the front one.
+                    for window in data.space.elements().rev() {
                         let wl = data.space.element_location(window).unwrap_or_default();
                         let gw = window.geometry().size.w;
                         if gw <= 0 {

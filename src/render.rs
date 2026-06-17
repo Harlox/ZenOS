@@ -210,7 +210,9 @@ impl Gpu {
             Kind::Unspecified,
         )));
 
-        for window in space.elements() {
+        // space.elements() is bottom-to-top; the scene list is front-to-back
+        // (index 0 = topmost). Reverse so the topmost window draws on top.
+        for window in space.elements().rev() {
             let g = space.element_location(window).unwrap_or_default();
             let lx = g.x - ox;
             let ly = g.y - oy;
