@@ -92,7 +92,13 @@ const LIGHT_MAX: [f32; 4] = [0.16, 0.78, 0.25, 1.0]; // #28C840
 /// `v_coords` is normalized [0,1] across the element.
 const ROUNDED_SHADER: &str = r#"
 #extension GL_OES_standard_derivatives : enable
+// highp: the SDF is computed in pixel coords (up to ~250px from center for the
+// dock); mediump (~10-bit mantissa) rounds those off and the corners go fuzzy.
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 varying vec2 v_coords;
 uniform float alpha;
 uniform vec4 u_color;
@@ -120,7 +126,11 @@ void main() {
 /// window content. `v_coords.y == 0` is the top edge.
 const TOP_ROUNDED_SHADER: &str = r#"
 #extension GL_OES_standard_derivatives : enable
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
 varying vec2 v_coords;
 uniform float alpha;
 uniform vec4 u_color;
