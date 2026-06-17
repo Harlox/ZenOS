@@ -76,6 +76,16 @@ impl ZenState {
             seat,
         }
     }
+
+    /// Render the current frame via the GPU (split borrows: gpu + space).
+    pub fn render(&mut self) {
+        let Self { gpu, space, .. } = self;
+        if let Some(gpu) = gpu {
+            if let Err(e) = gpu.render(space) {
+                tracing::error!("render failed: {e}");
+            }
+        }
+    }
 }
 
 /// Per-client data: holds the client's compositor state.

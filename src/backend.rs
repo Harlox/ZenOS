@@ -24,8 +24,13 @@ use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{InputEvent, KeyState, KeyboardKeyEvent};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::reexports::input::Libinput;
-use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::{AsRenderElements, Kind};
+use smithay::backend::renderer::{ImportAll, ImportMem};
 use smithay::backend::renderer::gles::element::PixelShaderElement;
+use smithay::desktop::{Space, Window};
+use smithay::render_elements;
+use smithay::utils::Scale;
 use smithay::backend::renderer::gles::{
     GlesPixelProgram, GlesRenderer, Uniform, UniformName, UniformType,
 };
@@ -93,6 +98,13 @@ void main() {
 type ZenCompositor =
     DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
 
+render_elements! {
+    /// One frame's elements: client window surfaces + ZenOS UI (bar/dock).
+    pub ZenElement<R> where R: ImportAll + ImportMem;
+    Window = WaylandSurfaceRenderElement<R>,
+    Ui = PixelShaderElement,
+}
+
 /// One GPU: the DRM device, GBM allocator, GLES renderer and scanout compositor.
 pub struct Gpu {
     pub node: DrmNode,
@@ -110,9 +122,9 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    /// Render one frame: top bar + bottom dock (rounded corners) over a clear
-    /// background, then page-flip.
-    fn render(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Render one frame: client windows below, ZenOS UI (bar/dock) on top, over
+    /// a clear background, then page-flip.
+    pub fn render(&mut self, space: &Space<Window>) -> Result<(), Box<dyn std::error::Error>> {
         let (w, h) = self.size;
         let dock_x = (w - DOCK_W) / 2;
         let dock_y = h - DOCK_H - DOCK_MARGIN;
@@ -140,8 +152,26 @@ impl Gpu {
             ],
             Kind::Unspecified,
         );
-        let elements = [bar, dock];
-        self.compositor.render_frame::<_, PixelShaderElement>(
+
+        // Front-to-back: UI on top, then client windows.
+        let mut elements: Vec<ZenElement<GlesRenderer>> =
+            vec![ZenElement::Ui(bar), ZenElement::Ui(dock)];
+        let scale = Scale::from(1.0);
+        for window in space.elements() {
+            let loc = space
+                .element_location(window)
+                .unwrap_or_default()
+                .to_physical_precise_round(1.0);
+            let rels = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+                &mut self.renderer,
+                loc,
+                scale,
+                1.0,
+            );
+            elements.extend(rels.into_iter().map(ZenElement::Window));
+        }
+
+        self.compositor.render_frame::<_, ZenElement<GlesRenderer>>(
             &mut self.renderer,
             &elements,
             Color32F::from(CLEAR),
@@ -230,11 +260,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Open + init the primary GPU (steps 3-4).
     let mut gpu = open_gpu(&mut state.session, primary, &dev_path)?;
 
-    // First frame: clear to gray.
-    if let Err(e) = gpu.render() {
+    // First frame.
+    if let Err(e) = gpu.render(&state.space) {
         tracing::error!("first render failed: {e}");
     } else {
-        tracing::info!("first frame submitted (gray clear)");
+        tracing::info!("first frame submitted");
     }
     // Map the output into the Space so clients can be laid out on it.
     state.space.map_output(&gpu.output, (0, 0));
@@ -280,8 +310,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     while state.running {
         event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
 
-        // Service Wayland clients, then flush replies.
+        // Service Wayland clients.
         display.dispatch_clients(&mut state)?;
+
+        // Redraw (windows + UI), then flush replies.
+        state.space.refresh();
+        state.render();
         display.flush_clients()?;
 
         if let Some(d) = deadline {
