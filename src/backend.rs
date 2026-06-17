@@ -388,16 +388,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // output below the bar + titlebar and remember the old one.
                         if let Some(t) = window.toplevel() {
                             let surf = t.wl_surface().clone();
+                            // Owned copy so the outputs() iterator borrow ends here,
+                            // before the &mut data.space below.
+                            let out_geo = data
+                                .space
+                                .outputs()
+                                .next()
+                                .and_then(|o| data.space.output_geometry(o));
                             if let Some(((rx, ry), (rw, rh))) = data.maximized.remove(&surf) {
                                 t.with_pending_state(|s| s.size = Some((rw, rh).into()));
                                 t.send_configure();
                                 data.space.map_element(window.clone(), (rx, ry), false);
-                            } else if let Some(geo) = data
-                                .space
-                                .outputs()
-                                .next()
-                                .and_then(|o| data.space.output_geometry(o))
-                            {
+                            } else if let Some(geo) = out_geo {
                                 let cur = window.geometry().size;
                                 data.maximized.insert(surf, ((wl.x, wl.y), (cur.w, cur.h)));
                                 let mw = geo.size.w;
