@@ -15,7 +15,7 @@ use smithay::wayland::shm::ShmState;
 
 use smithay::backend::session::libseat::LibSeatSession;
 
-use crate::backend::Gpu;
+use crate::render::Gpu;
 
 /// Whole-compositor state: DRM backend + Wayland frontend. Passed as `&mut data`
 /// to every calloop event source.
