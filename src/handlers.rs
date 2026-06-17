@@ -46,12 +46,14 @@ impl CompositorHandler for ZenState {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self
+            // Bind before the `if let` so the elements() iterator temporary is
+            // dropped here, freeing *self for set_focus below.
+            let window = self
                 .space
                 .elements()
                 .find(|w| w.toplevel().map(|t| t.wl_surface() == &root).unwrap_or(false))
-                .cloned()
-            {
+                .cloned();
+            if let Some(window) = window {
                 window.on_commit();
                 // Send the initial configure once, so the client attaches a
                 // buffer and actually draws.
