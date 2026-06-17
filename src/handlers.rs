@@ -105,15 +105,10 @@ impl XdgShellHandler for ZenState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         tracing::info!("new toplevel window");
-        let wl_surface = surface.wl_surface().clone();
         let window = Window::new_wayland_window(surface);
         // Place below the top bar (40px) so the whole window is visible.
         self.space.map_element(window, (40, 40), false);
-        // Give the new window keyboard focus.
-        if let Some(keyboard) = self.seat.get_keyboard() {
-            let serial = SERIAL_COUNTER.next_serial();
-            keyboard.set_focus(self, Some(wl_surface), serial);
-        }
+        // Keyboard focus is set on commit (once the client is ready), not here.
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
