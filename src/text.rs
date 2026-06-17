@@ -14,7 +14,9 @@ use smithay::utils::{Point, Transform};
 /// placement metrics relative to the pen position / baseline.
 struct Glyph {
     tex: Option<TextureBuffer<GlesTexture>>,
+    #[allow(dead_code)]
     width: i32,
+    #[allow(dead_code)]
     height: i32,
     /// x offset from the pen to the bitmap's left edge.
     left: i32,

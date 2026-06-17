@@ -35,14 +35,20 @@ pub struct ZenState {
 
     // --- wayland frontend ---
     pub display_handle: DisplayHandle,
+    /// Held to wake/stop the loop; not read directly yet.
+    #[allow(dead_code)]
     pub loop_signal: LoopSignal,
     pub space: Space<Window>,
     pub popups: PopupManager,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    /// Held to keep the Wayland global alive; not read directly.
+    #[allow(dead_code)]
     pub xdg_decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
+    /// Held to keep the Wayland global alive; not read directly.
+    #[allow(dead_code)]
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<ZenState>,
     pub data_device_state: DataDeviceState,
