@@ -65,7 +65,7 @@ use crate::config::*;
 use crate::shaders::*;
 
 use crate::drm::{open_device, scan_connectors};
-use crate::render::dock_icon_pos;
+use crate::layout::dock_icon_pos;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --- Step 1: session -----------------------------------------------------

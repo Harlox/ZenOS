@@ -57,6 +57,8 @@ use crate::state::ZenState;
 use crate::config::*;
 use crate::shaders::*;
 use crate::render::*;
+use crate::assets::{load_icon, load_wallpaper};
+use crate::layout::relayout_outputs;
 
 /// Open the DRM device + GBM allocator + EGL/GLES renderer and compile the
 /// shaders. Outputs are added later by `scan_connectors`.

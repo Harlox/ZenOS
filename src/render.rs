@@ -56,6 +56,8 @@ use crate::state::ZenState;
 
 use crate::config::*;
 use crate::shaders::*;
+use crate::layout::dock_icon_pos;
+use crate::assets::ICON_TEX;
 
 /// The DrmCompositor type for one output: GBM allocator + GBM framebuffer
 /// exporter, `()` queue user-data, DrmDeviceFd-backed GBM.
@@ -608,100 +610,3 @@ impl Gpu {
     }
 }
 
-/// Position outputs left-to-right (stable order by CRTC) in the global Space.
-pub fn relayout_outputs(gpu: &mut Gpu, space: &mut Space<Window>) {
-    // crtc::Handle isn't Ord; order by output name for a stable left-to-right
-    // layout (e.g. eDP-* then HDMI-A-*).
-    let mut crtcs: Vec<crtc::Handle> = gpu.surfaces.keys().copied().collect();
-    crtcs.sort_by_key(|c| gpu.surfaces[c].output.name());
-    let mut x = 0;
-    for crtc in crtcs {
-        if let Some(s) = gpu.surfaces.get_mut(&crtc) {
-            s.location = (x, 0);
-            space.map_output(&s.output, (x, 0));
-            x += s.size.0;
-        }
-    }
-}
-
-/// Top-left (output-local) px of dock icon `i` of `n`.
-pub fn dock_icon_pos(w: i32, h: i32, i: usize, n: usize) -> (i32, i32) {
-    let dw = dock_width(n);
-    let dock_x = (w - dw) / 2;
-    let dock_y = h - DOCK_H - DOCK_MARGIN;
-    let x = dock_x + DOCK_PAD_X + i as i32 * (ICON_SIZE + ICON_GAP);
-    let y = dock_y + DOCK_PAD_Y;
-    (x, y)
-}
-
-/// Texture resolution for dock icons (> ICON_SIZE so magnified icons stay crisp).
-const ICON_TEX: i32 = 128;
-
-/// Decode an embedded icon PNG and upload it as a square texture. The pixels are
-/// premultiplied (smithay blends premultiplied alpha) so the icons' transparent
-/// corners and anti-aliased edges render correctly.
-pub fn load_icon(renderer: &mut GlesRenderer, bytes: &[u8]) -> Option<TextureBuffer<GlesTexture>> {
-    let img = image::load_from_memory(bytes).ok()?;
-    let scaled =
-        img.resize_to_fill(ICON_TEX as u32, ICON_TEX as u32, image::imageops::FilterType::Lanczos3);
-    let mut rgba = scaled.to_rgba8();
-    for px in rgba.pixels_mut() {
-        let alpha = px[3] as u16;
-        px[0] = (px[0] as u16 * alpha / 255) as u8;
-        px[1] = (px[1] as u16 * alpha / 255) as u8;
-        px[2] = (px[2] as u16 * alpha / 255) as u8;
-    }
-    TextureBuffer::from_memory(
-        renderer,
-        rgba.as_raw(),
-        Fourcc::Abgr8888,
-        (ICON_TEX, ICON_TEX),
-        false,
-        1,
-        Transform::Normal,
-        None,
-    )
-    .ok()
-}
-
-/// Load the wallpaper from `$ZENOS_WALLPAPER` (default
-/// `/usr/local/share/zenos/wallpaper.png`), cover-scale it to the output on the
-/// CPU, and upload as a GLES texture. Returns None (flat CLEAR bg) on any error.
-pub fn load_wallpaper(
-    renderer: &mut GlesRenderer,
-    w: i32,
-    h: i32,
-) -> Option<TextureBuffer<GlesTexture>> {
-    let path = std::env::var("ZENOS_WALLPAPER")
-        .unwrap_or_else(|_| "/usr/local/share/zenos/wallpaper.png".to_string());
-    let img = match image::open(&path) {
-        Ok(img) => img,
-        Err(e) => {
-            tracing::warn!("no wallpaper at {path} ({e}); using flat background");
-            return None;
-        }
-    };
-    // Cover-scale: fill w×h exactly, cropping overflow, no distortion.
-    let scaled = img.resize_to_fill(w as u32, h as u32, image::imageops::FilterType::Lanczos3);
-    let rgba = scaled.to_rgba8();
-    // image RGBA8 byte order is R,G,B,A == DRM Abgr8888 (little-endian).
-    match TextureBuffer::from_memory(
-        renderer,
-        rgba.as_raw(),
-        Fourcc::Abgr8888,
-        (w, h),
-        false,
-        1,
-        Transform::Normal,
-        Some(vec![Rectangle::from_size((w, h).into())]),
-    ) {
-        Ok(buf) => {
-            tracing::info!("wallpaper loaded from {path} ({w}x{h})");
-            Some(buf)
-        }
-        Err(e) => {
-            tracing::error!("wallpaper import failed: {e}");
-            None
-        }
-    }
-}
