@@ -22,7 +22,7 @@ use smithay::backend::input::{
     PointerMotionEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
-use smithay::input::keyboard::FilterResult;
+use smithay::input::keyboard::{keysyms, FilterResult, Keysym};
 use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::reexports::input::Libinput;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
@@ -168,9 +168,9 @@ const DOCK_APPS: &[DockApp] = &[
     },
 ];
 /// xkb keycodes (evdev + 8). smithay's Keycode is xkb-space.
-const KEY_ESC: u32 = 9; // evdev KEY_ESC 1 -> quit
-const KEY_F1: u32 = 67; // evdev KEY_F1 59 -> spawn a terminal (Enter stays free)
-const KEY_F2: u32 = 68; // evdev KEY_F2 60 -> screenshot to /tmp/zenos-shot.png
+const RAW_KEY_ESC: u32 = 9; // evdev KEY_ESC 1 + XKB offset
+const RAW_KEY_F1: u32 = 67; // evdev KEY_F1 59 + XKB offset
+const RAW_KEY_F2: u32 = 68; // evdev KEY_F2 60 + XKB offset
 const BAR_RADIUS: f32 = 0.0;
 const DOCK_RADIUS: f32 = 20.0;
 const CURSOR_SIZE: i32 = 12;
@@ -818,8 +818,6 @@ impl Gpu {
         if res.is_empty {
             return Ok(false);
         }
-        compositor.queue_frame(())?;
-        *pending_flip = true;
 
         // F2 screenshot: re-render the full frame into a temp texture and save
         // it (clean, unlike a phone photo). Rare path; ignore on error.
@@ -847,6 +845,9 @@ impl Gpu {
                 Err(e) => tracing::error!("screenshot failed: {e}"),
             }
         }
+
+        compositor.queue_frame(())?;
+        *pending_flip = true;
         Ok(true)
     }
 }
@@ -1007,18 +1008,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let code = event.key_code();
             let key_state = event.state();
             // Forward to the focused client, unless it's a compositor shortcut.
-            keyboard.input::<(), _>(data, code, key_state, serial, time, |data, _mods, _sym| {
+            keyboard.input::<(), _>(data, code, key_state, serial, time, |data, _mods, sym| {
                 if key_state == KeyState::Pressed {
-                    if code == KEY_ESC.into() {
+                    let keysym = sym.modified_sym();
+                    if keysym == Keysym::new(keysyms::KEY_Escape) || code == RAW_KEY_ESC.into() {
                         tracing::info!("Esc pressed, exiting");
                         data.running = false;
                         return FilterResult::Intercept(());
-                    } else if code == KEY_F1.into() {
+                    } else if keysym == Keysym::new(keysyms::KEY_F1) || code == RAW_KEY_F1.into() {
                         tracing::info!("F1 pressed, launching foot");
                         let _ = std::process::Command::new("foot").spawn();
                         return FilterResult::Intercept(());
-                    } else if code == KEY_F2.into() {
-                        tracing::info!("F2 pressed, screenshot");
+                    } else if keysym == Keysym::new(keysyms::KEY_F2) || code == RAW_KEY_F2.into() {
+                        tracing::info!("F2 pressed, screenshot (code={code:?}, sym={keysym:?})");
                         data.screenshot = true;
                         return FilterResult::Intercept(());
                     }

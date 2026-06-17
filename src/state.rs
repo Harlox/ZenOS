@@ -124,10 +124,13 @@ impl ZenState {
         let cursor = (pointer_location.x as i32, pointer_location.y as i32);
         // Clear dirty only if every output was rendered (none mid-flip); a
         // skipped output retries on its next VBlank-driven render.
-        if gpu.render_all(space, cursor, shot) {
+        let rendered = gpu.render_all(space, cursor, shot);
+        if rendered {
             self.dirty = false;
         }
-        self.screenshot = false;
+        if rendered || !shot {
+            self.screenshot = false;
+        }
     }
 
     /// Tell clients they may draw the next frame. Called once per VBlank, so a
