@@ -266,7 +266,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         tracing::info!("first frame submitted");
     }
-    // Map the output into the Space so clients can be laid out on it.
+    // Advertise the output to clients (wl_output global) so they see a monitor,
+    // then map it into the Space.
+    let _output_global = gpu.output.create_global::<ZenState>(&state.display_handle);
     state.space.map_output(&gpu.output, (0, 0));
     state.gpu = Some(gpu);
 
