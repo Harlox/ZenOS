@@ -7,7 +7,7 @@ use smithay::input::pointer::CursorImageStatus;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Client;
-use smithay::utils::Serial;
+use smithay::utils::{Serial, SERIAL_COUNTER};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, is_sync_subsurface, with_states, CompositorClientState, CompositorHandler,
@@ -94,8 +94,14 @@ impl XdgShellHandler for ZenState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         tracing::info!("new toplevel window");
+        let wl_surface = surface.wl_surface().clone();
         let window = Window::new_wayland_window(surface);
         self.space.map_element(window, (0, 0), false);
+        // Give the new window keyboard focus.
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            let serial = SERIAL_COUNTER.next_serial();
+            keyboard.set_focus(self, Some(wl_surface), serial);
+        }
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {

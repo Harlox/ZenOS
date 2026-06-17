@@ -21,8 +21,9 @@ use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmEvent, DrmDeviceNotifier, DrmNode};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
-use smithay::backend::input::{InputEvent, KeyState, KeyboardKeyEvent};
+use smithay::backend::input::{Event, InputEvent, KeyState, KeyboardKeyEvent};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::input::keyboard::FilterResult;
 use smithay::reexports::input::Libinput;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
@@ -42,7 +43,7 @@ use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::drm::control::{connector, Device as _};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::Display;
-use smithay::utils::{DeviceFd, Rectangle};
+use smithay::utils::{DeviceFd, Rectangle, SERIAL_COUNTER};
 use smithay::wayland::socket::ListeningSocketSource;
 
 use std::sync::Arc;
@@ -309,21 +310,26 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let libinput_backend = LibinputInputBackend::new(libinput);
     handle.insert_source(libinput_backend, move |event, _, data| {
         if let InputEvent::Keyboard { event } = event {
-            if event.state() == KeyState::Pressed {
-                let code = event.key_code();
-                if code == KEY_ESC.into() {
-                    tracing::info!("Esc pressed, exiting");
-                    data.running = false;
-                } else if code == KEY_ENTER.into() {
-                    // Spawn a terminal. The child inherits WAYLAND_DISPLAY +
-                    // XDG_RUNTIME_DIR from us, so it connects to ZenOS directly.
-                    tracing::info!("Enter pressed, launching foot");
-                    match std::process::Command::new("foot").spawn() {
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!("failed to launch foot: {e}"),
+            let keyboard = data.seat.get_keyboard().unwrap();
+            let serial = SERIAL_COUNTER.next_serial();
+            let time = event.time_msec();
+            let code = event.key_code();
+            let key_state = event.state();
+            // Forward to the focused client, unless it's a compositor shortcut.
+            keyboard.input::<(), _>(data, code, key_state, serial, time, |data, _mods, _sym| {
+                if key_state == KeyState::Pressed {
+                    if code == KEY_ESC.into() {
+                        tracing::info!("Esc pressed, exiting");
+                        data.running = false;
+                        return FilterResult::Intercept(());
+                    } else if code == KEY_ENTER.into() {
+                        tracing::info!("Enter pressed, launching foot");
+                        let _ = std::process::Command::new("foot").spawn();
+                        return FilterResult::Intercept(());
                     }
                 }
-            }
+                FilterResult::Forward
+            });
         }
     })?;
 
