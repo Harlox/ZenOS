@@ -42,7 +42,7 @@ use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, Mode as CalloopMode, PostAction};
-use smithay::reexports::drm::control::{connector, crtc, Device as _, ResourceHandles};
+use smithay::reexports::drm::control::{connector, crtc, Device as _, Mode as DrmMode, ResourceHandles};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
@@ -812,16 +812,16 @@ fn create_surface(
     res: &ResourceHandles,
     dh: &DisplayHandle,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Highest refresh at the largest resolution (tie-break on Hz).
-    let mode = conn
-        .modes()
-        .iter()
-        .copied()
-        .max_by_key(|m| {
-            let (w, h) = m.size();
-            (w as u64 * h as u64, m.vrefresh())
-        })
-        .ok_or("connector has no modes")?;
+    // Log every mode the connector exposes (helps diagnose missing resolutions).
+    for m in conn.modes() {
+        tracing::info!(
+            "  mode available: {}x{}@{}Hz",
+            m.size().0,
+            m.size().1,
+            m.vrefresh()
+        );
+    }
+    let mode = pick_mode(conn.modes()).ok_or("connector has no modes")?;
 
     // Pick a CRTC drivable by this connector's encoders that isn't already used.
     let used: HashSet<crtc::Handle> = gpu.surfaces.keys().copied().collect();
@@ -890,6 +890,42 @@ fn create_surface(
         },
     );
     Ok(())
+}
+
+/// Pick a DRM mode. Honors `$ZENOS_MODE` ("WxH" or "WxH@Hz", applied to any
+/// connector that offers it); otherwise the highest resolution, tie-broken on
+/// refresh. A connector without the requested mode falls back to its max.
+fn pick_mode(modes: &[DrmMode]) -> Option<DrmMode> {
+    if let Ok(spec) = std::env::var("ZENOS_MODE") {
+        let (res, rate) = match spec.split_once('@') {
+            Some((r, hz)) => (r, hz.parse::<u32>().ok()),
+            None => (spec.as_str(), None),
+        };
+        if let Some((ws, hs)) = res.split_once('x') {
+            if let (Ok(w), Ok(h)) = (ws.trim().parse::<u16>(), hs.trim().parse::<u16>()) {
+                let found = modes
+                    .iter()
+                    .copied()
+                    .filter(|m| m.size() == (w, h))
+                    .filter(|m| rate.map_or(true, |r| m.vrefresh() == r))
+                    .max_by_key(|m| m.vrefresh());
+                if let Some(m) = found {
+                    tracing::info!(
+                        "ZENOS_MODE={spec} -> {}x{}@{}Hz",
+                        m.size().0,
+                        m.size().1,
+                        m.vrefresh()
+                    );
+                    return Some(m);
+                }
+                tracing::warn!("ZENOS_MODE={spec} not offered by this output; using max");
+            }
+        }
+    }
+    modes.iter().copied().max_by_key(|m| {
+        let (w, h) = m.size();
+        (w as u64 * h as u64, m.vrefresh())
+    })
 }
 
 /// Position outputs left-to-right (stable order by CRTC) in the global Space.
