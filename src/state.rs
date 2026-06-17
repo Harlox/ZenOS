@@ -78,11 +78,17 @@ impl ZenState {
     }
 
     /// Render the current frame via the GPU (split borrows: gpu + space).
+    /// Skips if a flip is already pending; only marks pending when one is queued.
     pub fn render(&mut self) {
         let Self { gpu, space, .. } = self;
         if let Some(gpu) = gpu {
-            if let Err(e) = gpu.render(space) {
-                tracing::error!("render failed: {e}");
+            if gpu.pending_flip {
+                return;
+            }
+            match gpu.render(space) {
+                Ok(true) => gpu.pending_flip = true,
+                Ok(false) => {}
+                Err(e) => tracing::error!("render failed: {e}"),
             }
         }
     }

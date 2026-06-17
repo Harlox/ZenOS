@@ -120,12 +120,16 @@ pub struct Gpu {
     pub size: (i32, i32),
     /// Compiled rounded-rect pixel shader, reused for bar + dock.
     pub rounded: GlesPixelProgram,
+    /// True while a page-flip is in flight (cleared on VBlank). Avoids queuing a
+    /// second flip before the first completes.
+    pub pending_flip: bool,
 }
 
 impl Gpu {
     /// Render one frame: client windows below, ZenOS UI (bar/dock) on top, over
     /// a clear background, then page-flip.
-    pub fn render(&mut self, space: &Space<Window>) -> Result<(), Box<dyn std::error::Error>> {
+    /// Returns true if a frame was actually queued (had damage).
+    pub fn render(&mut self, space: &Space<Window>) -> Result<bool, Box<dyn std::error::Error>> {
         let (w, h) = self.size;
         let dock_x = (w - DOCK_W) / 2;
         let dock_y = h - DOCK_H - DOCK_MARGIN;
@@ -171,14 +175,17 @@ impl Gpu {
             elements.extend(rels.into_iter().map(ZenElement::Window));
         }
 
-        self.compositor.render_frame::<_, ZenElement>(
+        let res = self.compositor.render_frame::<_, ZenElement>(
             &mut self.renderer,
             &elements,
             Color32F::from(CLEAR),
             FrameFlags::DEFAULT,
         )?;
+        if res.is_empty {
+            return Ok(false); // no damage -> nothing to flip
+        }
         self.compositor.queue_frame(())?;
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -260,12 +267,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Open + init the primary GPU (steps 3-4).
     let (mut gpu, drm_notifier) = open_gpu(&mut state.session, primary, &dev_path)?;
 
-    // First frame: starts the page-flip chain. Subsequent frames are driven by
-    // the DRM VBlank event below.
-    if let Err(e) = gpu.render(&state.space) {
-        tracing::error!("first render failed: {e}");
-    } else {
-        tracing::info!("first frame submitted");
+    // First frame: starts the page-flip chain.
+    match gpu.render(&state.space) {
+        Ok(true) => {
+            gpu.pending_flip = true;
+            tracing::info!("first frame submitted");
+        }
+        Ok(false) => {}
+        Err(e) => tracing::error!("first render failed: {e}"),
     }
     // Advertise the output to clients (wl_output global) so they see a monitor,
     // then map it into the Space.
@@ -279,8 +288,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         DrmEvent::VBlank(_crtc) => {
             if let Some(gpu) = &mut data.gpu {
                 let _ = gpu.compositor.frame_submitted();
+                gpu.pending_flip = false;
             }
-            data.render();
         }
         DrmEvent::Error(e) => tracing::error!("DRM error: {e:?}"),
     })?;
@@ -336,9 +345,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     while state.running {
         event_loop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
 
-        // Service Wayland clients. Rendering is driven by the DRM VBlank source.
+        // Service Wayland clients, refresh layout, then render (queues a flip
+        // only if there is damage and none is pending).
         display.dispatch_clients(&mut state)?;
         state.space.refresh();
+        state.render();
         display.flush_clients()?;
 
         if let Some(d) = deadline {
@@ -458,6 +469,7 @@ fn open_gpu(
             compositor,
             size,
             rounded,
+            pending_flip: false,
         },
         drm_notifier,
     ))
