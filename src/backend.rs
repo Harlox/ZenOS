@@ -26,7 +26,6 @@ use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface}
 use smithay::reexports::input::Libinput;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
-use smithay::backend::renderer::{ImportAll, ImportMem};
 use smithay::backend::renderer::gles::element::PixelShaderElement;
 use smithay::desktop::{Space, Window};
 use smithay::render_elements;
@@ -100,8 +99,8 @@ type ZenCompositor =
 
 render_elements! {
     /// One frame's elements: client window surfaces + ZenOS UI (bar/dock).
-    pub ZenElement<R> where R: ImportAll + ImportMem;
-    Window = WaylandSurfaceRenderElement<R>,
+    pub ZenElement;
+    Window = WaylandSurfaceRenderElement<GlesRenderer>,
     Ui = PixelShaderElement,
 }
 
@@ -154,8 +153,7 @@ impl Gpu {
         );
 
         // Front-to-back: UI on top, then client windows.
-        let mut elements: Vec<ZenElement<GlesRenderer>> =
-            vec![ZenElement::Ui(bar), ZenElement::Ui(dock)];
+        let mut elements: Vec<ZenElement> = vec![ZenElement::Ui(bar), ZenElement::Ui(dock)];
         let scale = Scale::from(1.0);
         for window in space.elements() {
             let loc = space
@@ -171,7 +169,7 @@ impl Gpu {
             elements.extend(rels.into_iter().map(ZenElement::Window));
         }
 
-        self.compositor.render_frame::<_, ZenElement<GlesRenderer>>(
+        self.compositor.render_frame::<_, ZenElement>(
             &mut self.renderer,
             &elements,
             Color32F::from(CLEAR),
