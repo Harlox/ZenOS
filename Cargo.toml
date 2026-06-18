@@ -1,6 +1,15 @@
 [workspace]
 members = ["apps/zterm"]
 
+# Aggressive release build (workspace-wide). Bigger compile, faster binary —
+# worth it on the old target CPU. panic=abort drops unwind tables.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
 [package]
 name = "zenos"
 version = "0.1.0"

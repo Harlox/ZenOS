@@ -1,0 +1,4 @@
+# Build for the exact CPU we compile on (the Arch target). Lets the old laptop's
+# SIMD (SSE/AVX) actually get used. Safe because we build on the machine we run on.
+[build]
+rustflags = ["-C", "target-cpu=native"]
