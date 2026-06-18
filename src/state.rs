@@ -17,6 +17,7 @@ use smithay::wayland::shm::ShmState;
 
 use smithay::backend::session::libseat::LibSeatSession;
 
+use crate::config::MOVE_LERP;
 use crate::render::Gpu;
 
 /// Whole-compositor state: DRM backend + Wayland frontend. Passed as `&mut data`
@@ -73,6 +74,12 @@ pub struct ZenState {
     pub maximized: HashMap<WlSurface, ((i32, i32), (i32, i32))>,
     /// Top-bar power dropdown (Restart / Shut Down) open state.
     pub power_menu_open: bool,
+    /// Interpolated window origin during a move (smooths a low-Hz touchpad to the
+    /// display refresh). `None` when no move is active.
+    pub move_current: Option<(f64, f64)>,
+    /// How far the interpolated window/cursor currently trails the real pointer.
+    /// Applied to the rendered cursor too, so titlebar + cursor stay locked.
+    pub move_lag: (f64, f64),
 }
 
 /// Tracks an interactive window move.
@@ -143,6 +150,8 @@ impl ZenState {
             placed: HashSet::new(),
             maximized: HashMap::new(),
             power_menu_open: false,
+            move_current: None,
+            move_lag: (0.0, 0.0),
         }
     }
 
@@ -150,17 +159,43 @@ impl ZenState {
     /// renderer fully re-composes each call, so we gate on dirty to avoid
     /// flipping every VBlank. Does NOT send frame callbacks — those go out on
     /// VBlank so clients are throttled to the monitor refresh.
-    /// Apply an active interactive move once, from the latest pointer position.
-    /// Called per frame (not per input event) so a 1000Hz mouse doesn't reposition
-    /// the window a thousand times between two vblanks — one map, freshest coords.
+    /// Apply an active interactive move once per frame. The window eases toward
+    /// the pointer target (`MOVE_LERP`) instead of snapping, so a low-Hz touchpad
+    /// looks smooth at the display refresh. `move_lag` records the residual gap so
+    /// render() can offset the cursor by the same amount — titlebar and cursor
+    /// stay locked under the finger. No grab → reset the interpolation state.
     fn apply_move_grab(&mut self) {
-        if let Some(grab) = &self.move_grab {
-            let dx = (self.pointer_location.x - grab.start_ptr.x) as i32;
-            let dy = (self.pointer_location.y - grab.start_ptr.y) as i32;
-            let new = (grab.start_win.x + dx, grab.start_win.y + dy);
-            let window = grab.window.clone();
-            self.space.map_element(window, new, false);
+        let Some(grab) = self.move_grab.as_ref() else {
+            self.move_current = None;
+            self.move_lag = (0.0, 0.0);
+            return;
+        };
+        let (start_win, start_ptr, window) =
+            (grab.start_win, grab.start_ptr, grab.window.clone());
+
+        let tx = start_win.x as f64 + (self.pointer_location.x - start_ptr.x);
+        let ty = start_win.y as f64 + (self.pointer_location.y - start_ptr.y);
+        // First frame of a grab starts on-target (no initial jump).
+        let cur = self.move_current.get_or_insert((tx, ty));
+        cur.0 += (tx - cur.0) * MOVE_LERP;
+        cur.1 += (ty - cur.1) * MOVE_LERP;
+        // Snap the last sub-pixel so it settles exactly instead of crawling.
+        if (tx - cur.0).abs() < 0.5 {
+            cur.0 = tx;
         }
+        if (ty - cur.1).abs() < 0.5 {
+            cur.1 = ty;
+        }
+        let (cx, cy) = *cur;
+        self.move_lag = (tx - cx, ty - cy);
+        self.space
+            .map_element(window, (cx.round() as i32, cy.round() as i32), false);
+    }
+
+    /// True while the interpolated move hasn't caught up to the pointer yet, so
+    /// render() should keep composing each vblank until it settles.
+    fn move_settling(&self) -> bool {
+        self.move_grab.is_some() && (self.move_lag.0.abs() > 0.5 || self.move_lag.1.abs() > 0.5)
     }
 
     pub fn render(&mut self) {
@@ -171,6 +206,7 @@ impl ZenState {
         let shot = self.screenshot;
         let scene_dirty = self.scene_dirty;
         let menu_open = self.power_menu_open;
+        let move_lag = self.move_lag;
         let Self {
             gpu,
             space,
@@ -179,7 +215,12 @@ impl ZenState {
         } = self;
         let Some(gpu) = gpu else { return };
 
-        let cursor = (pointer_location.x as i32, pointer_location.y as i32);
+        // Offset the cursor by the same lag as the eased window, so the titlebar
+        // stays under the pointer during an interpolated drag.
+        let cursor = (
+            (pointer_location.x - move_lag.0) as i32,
+            (pointer_location.y - move_lag.1) as i32,
+        );
         // Clear dirty only if every output was rendered (none mid-flip); a
         // skipped output retries on its next VBlank-driven render.
         let rendered = gpu.render_all(space, cursor, shot, scene_dirty, menu_open);
@@ -189,6 +230,12 @@ impl ZenState {
         }
         if rendered || !shot {
             self.screenshot = false;
+        }
+        // Keep composing each vblank until the eased move catches the pointer,
+        // even after input events stop arriving.
+        if self.move_settling() {
+            self.dirty = true;
+            self.scene_dirty = true;
         }
     }
 

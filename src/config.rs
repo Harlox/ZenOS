@@ -162,6 +162,12 @@ pub const RAW_KEY_F2: u32 = 68; // evdev KEY_F2 60 + XKB offset
 /// Left mouse button (evdev BTN_LEFT).
 pub const BTN_LEFT: u32 = 0x110;
 
+// --- Interaction ---------------------------------------------------------
+/// Window-move easing factor per frame (0..1). The window covers this fraction
+/// of the remaining distance to the pointer each frame: higher = snappier/less
+/// smooth, lower = smoother but more trail. Smooths a low-Hz touchpad to refresh.
+pub const MOVE_LERP: f64 = 0.35;
+
 // --- Server-side decorations (macOS-style) ------------------------------
 /// Titlebar height in px. Drawn above each toplevel's surface.
 pub const TITLEBAR_H: i32 = 28;

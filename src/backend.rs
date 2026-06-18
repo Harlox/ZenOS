@@ -555,7 +555,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             } else {
-                data.move_grab = None;
+                // On release, snap the window to the exact drop point (the eased
+                // position lags the pointer by move_lag) and clear interpolation.
+                if let Some(grab) = data.move_grab.take() {
+                    let loc = data.pointer_location;
+                    let dx = (loc.x - grab.start_ptr.x) as i32;
+                    let dy = (loc.y - grab.start_ptr.y) as i32;
+                    let pos = (grab.start_win.x + dx, grab.start_win.y + dy);
+                    data.space.map_element(grab.window, pos, false);
+                    data.move_current = None;
+                    data.move_lag = (0.0, 0.0);
+                    data.scene_dirty = true;
+                }
                 data.resize_grab = None;
             }
             let pointer = data.seat.get_pointer().unwrap();
