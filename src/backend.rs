@@ -236,48 +236,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             loc.y = (loc.y + event.delta_y()).clamp(0.0, maxh as f64);
             data.pointer_location = loc;
 
-            if let Some(grab) = &data.resize_grab {
-                let dx = (loc.x - grab.start_ptr.x) as i32;
-                let dy = (loc.y - grab.start_ptr.y) as i32;
-                let (sw, sh) = grab.start_size;
-                let (sx, sy) = (grab.start_loc.x, grab.start_loc.y);
-                let (gl, gr, gt, gb) = (grab.left, grab.right, grab.top, grab.bottom);
-                let last = grab.last_size;
-                let window = grab.window.clone();
-                let mut nw = sw;
-                let mut nh = sh;
-                if gr {
-                    nw = sw + dx;
-                }
-                if gl {
-                    nw = sw - dx;
-                }
-                if gb {
-                    nh = sh + dy;
-                }
-                if gt {
-                    nh = sh - dy;
-                }
-                nw = nw.max(WIN_MIN_W);
-                nh = nh.max(WIN_MIN_H);
-                // Skip when the target size is unchanged (most motions, since the
-                // client snaps to a grid): avoids a configure storm and jitter.
-                if (nw, nh) != last {
-                    // When dragging the left/top edge the origin moves with it, but
-                    // stops once the window hits its minimum size.
-                    let nx = if gl { sx + (sw - nw) } else { sx };
-                    let ny = if gt { sy + (sh - nh) } else { sy };
-                    if let Some(t) = window.toplevel() {
-                        t.with_pending_state(|s| s.size = Some((nw, nh).into()));
-                        t.send_configure();
-                    }
-                    data.space.map_element(window, (nx, ny), false);
-                    data.dirty = true;
-                    data.scene_dirty = true;
-                    if let Some(g) = &mut data.resize_grab {
-                        g.last_size = (nw, nh);
-                    }
-                }
+            if data.resize_grab.is_some() {
+                // Coalesce like the move: one configure per frame from the latest
+                // pointer (in render()), not one per ~1000Hz motion event — that
+                // configure storm is what made corner-resize lag and tear. See
+                // ZenState::apply_resize_grab.
+                data.scene_dirty = true;
             } else if data.move_grab.is_some() {
                 // Don't reposition here: libinput motion fires ~1000Hz, far above
                 // the refresh. Just flag the scene dirty; render() applies the

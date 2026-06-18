@@ -17,7 +17,7 @@ use smithay::wayland::shm::ShmState;
 
 use smithay::backend::session::libseat::LibSeatSession;
 
-use crate::config::MOVE_LERP;
+use crate::config::{MOVE_LERP, WIN_MIN_H, WIN_MIN_W};
 use crate::render::Gpu;
 
 /// Whole-compositor state: DRM backend + Wayland frontend. Passed as `&mut data`
@@ -192,6 +192,55 @@ impl ZenState {
             .map_element(window, (cx.round() as i32, cy.round() as i32), false);
     }
 
+    /// Apply an active interactive resize once per frame, from the latest pointer
+    /// position. Coalesced like the move: one xdg configure per frame instead of
+    /// one per ~1000Hz motion event, which is what made corner-resize lag and the
+    /// stretched-buffer text tear. Deduped by `last_size` so a grid-snapping
+    /// client (terminal) doesn't get redundant configures.
+    fn apply_resize_grab(&mut self) {
+        let Some(grab) = self.resize_grab.as_ref() else {
+            return;
+        };
+        let dx = (self.pointer_location.x - grab.start_ptr.x) as i32;
+        let dy = (self.pointer_location.y - grab.start_ptr.y) as i32;
+        let (sw, sh) = grab.start_size;
+        let (sx, sy) = (grab.start_loc.x, grab.start_loc.y);
+        let (gl, gr, gt, gb) = (grab.left, grab.right, grab.top, grab.bottom);
+        let last = grab.last_size;
+        let window = grab.window.clone();
+
+        let mut nw = sw;
+        let mut nh = sh;
+        if gr {
+            nw = sw + dx;
+        }
+        if gl {
+            nw = sw - dx;
+        }
+        if gb {
+            nh = sh + dy;
+        }
+        if gt {
+            nh = sh - dy;
+        }
+        nw = nw.max(WIN_MIN_W);
+        nh = nh.max(WIN_MIN_H);
+        if (nw, nh) == last {
+            return;
+        }
+        // Left/top edges move the origin as the size changes.
+        let nx = if gl { sx + (sw - nw) } else { sx };
+        let ny = if gt { sy + (sh - nh) } else { sy };
+        if let Some(t) = window.toplevel() {
+            t.with_pending_state(|s| s.size = Some((nw, nh).into()));
+            t.send_configure();
+        }
+        self.space.map_element(window, (nx, ny), false);
+        if let Some(g) = &mut self.resize_grab {
+            g.last_size = (nw, nh);
+        }
+    }
+
     /// True while the interpolated move hasn't caught up to the pointer yet, so
     /// render() should keep composing each vblank until it settles.
     fn move_settling(&self) -> bool {
@@ -203,6 +252,7 @@ impl ZenState {
             return;
         }
         self.apply_move_grab();
+        self.apply_resize_grab();
         let shot = self.screenshot;
         let scene_dirty = self.scene_dirty;
         let menu_open = self.power_menu_open;
