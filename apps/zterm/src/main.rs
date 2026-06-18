@@ -89,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         window,
         keyboard: None,
+        mods: Modifiers::default(),
         qh: Some(qh.clone()),
         width: cols as u32 * font.cell_w as u32,
         height: rows as u32 * font.cell_h as u32,
@@ -135,6 +136,7 @@ struct State {
     pool: SlotPool,
     window: Window,
     keyboard: Option<WlKeyboard>,
+    mods: Modifiers,
     qh: Option<QueueHandle<State>>,
 
     width: u32,
@@ -213,19 +215,44 @@ impl State {
     }
 
     fn on_key(&mut self, event: KeyEvent) {
-        let bytes: Vec<u8> = match event.keysym {
-            Keysym::Return | Keysym::KP_Enter => vec![b'\r'],
-            Keysym::BackSpace => vec![0x7f],
-            Keysym::Tab => vec![b'\t'],
-            Keysym::Escape => vec![0x1b],
-            Keysym::Left => b"\x1b[D".to_vec(),
-            Keysym::Right => b"\x1b[C".to_vec(),
-            Keysym::Up => b"\x1b[A".to_vec(),
-            Keysym::Down => b"\x1b[B".to_vec(),
-            Keysym::Home => b"\x1b[H".to_vec(),
-            Keysym::End => b"\x1b[F".to_vec(),
-            _ => event.utf8.map(String::into_bytes).unwrap_or_default(),
+        let m = self.mods;
+        // Named keys: fixed control sequences. Shift+Tab is back-tab (CBT).
+        let named: Option<Vec<u8>> = match event.keysym {
+            Keysym::Return | Keysym::KP_Enter => Some(vec![b'\r']),
+            Keysym::BackSpace => Some(vec![0x7f]),
+            Keysym::Tab if m.shift => Some(b"\x1b[Z".to_vec()),
+            Keysym::Tab => Some(vec![b'\t']),
+            Keysym::Escape => Some(vec![0x1b]),
+            Keysym::Left => Some(b"\x1b[D".to_vec()),
+            Keysym::Right => Some(b"\x1b[C".to_vec()),
+            Keysym::Up => Some(b"\x1b[A".to_vec()),
+            Keysym::Down => Some(b"\x1b[B".to_vec()),
+            Keysym::Home => Some(b"\x1b[H".to_vec()),
+            Keysym::End => Some(b"\x1b[F".to_vec()),
+            Keysym::Page_Up => Some(b"\x1b[5~".to_vec()),
+            Keysym::Page_Down => Some(b"\x1b[6~".to_vec()),
+            Keysym::Insert => Some(b"\x1b[2~".to_vec()),
+            Keysym::Delete => Some(b"\x1b[3~".to_vec()),
+            _ => None,
         };
+
+        let mut bytes = if let Some(b) = named {
+            b
+        } else if m.ctrl {
+            // Ctrl+key → C0 control code, derived from the keysym so it's
+            // independent of how xkb folds control into utf8.
+            match ctrl_code(event.keysym.raw()) {
+                Some(b) => vec![b],
+                None => event.utf8.map(String::into_bytes).unwrap_or_default(),
+            }
+        } else {
+            event.utf8.map(String::into_bytes).unwrap_or_default()
+        };
+
+        // Alt acts as Meta: prefix ESC (xterm "metaSendsEscape").
+        if m.alt && !bytes.is_empty() {
+            bytes.insert(0, 0x1b);
+        }
         if !bytes.is_empty() {
             let _ = self.writer.write_all(&bytes);
             let _ = self.writer.flush();
@@ -319,6 +346,23 @@ fn fill_rect(px: &mut [u32], w: usize, h: usize, x: usize, y: usize, rw: usize, 
         for xx in x..(x + rw).min(w) {
             px[base + xx] = argb;
         }
+    }
+}
+
+/// C0 control byte for Ctrl+<key>, from the raw keysym (ASCII range). Covers
+/// Ctrl-A..Z (1..26) plus @ [ \ ] ^ _ ? — None for keys with no control code.
+fn ctrl_code(keysym: u32) -> Option<u8> {
+    match keysym {
+        0x61..=0x7a => Some(keysym as u8 - b'a' + 1), // a-z
+        0x41..=0x5a => Some(keysym as u8 - b'A' + 1), // A-Z (shifted)
+        0x20 | 0x40 => Some(0),                       // space, @
+        0x5b => Some(27),                             // [
+        0x5c => Some(28),                             // \
+        0x5d => Some(29),                             // ]
+        0x5e => Some(30),                             // ^
+        0x5f => Some(31),                             // _
+        0x3f => Some(127),                            // ?
+        _ => None,
     }
 }
 
@@ -436,7 +480,9 @@ impl KeyboardHandler for State {
         self.on_key(event);
     }
     fn release_key(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: u32, _: KeyEvent) {}
-    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: u32, _: Modifiers, _: u32) {}
+    fn update_modifiers(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlKeyboard, _: u32, modifiers: Modifiers, _: u32) {
+        self.mods = modifiers;
+    }
 }
 
 impl ProvidesRegistryState for State {
