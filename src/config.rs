@@ -47,15 +47,16 @@ pub const POWER_GLYPH_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
 pub const POWER_ITEMS: [&str; 2] = ["Restart", "Shut Down"];
 pub const MENU_X: i32 = 6;
 pub const MENU_GAP: i32 = 4; // gap below the bar
-pub const MENU_W: i32 = 180;
-pub const MENU_ITEM_H: i32 = 30;
-pub const MENU_PAD: i32 = 6;
+pub const MENU_W: i32 = 168;
+pub const MENU_ITEM_H: i32 = 26;
+pub const MENU_PAD: i32 = 4;
 pub const MENU_RADIUS: f32 = 10.0;
 pub const MENU_ITEM_RADIUS: f32 = 6.0;
-pub const MENU_BG: [f32; 4] = [0.20, 0.20, 0.22, 0.96];
-pub const MENU_HOVER: [f32; 4] = [0.20, 0.48, 0.95, 1.0]; // macOS selection blue
-pub const MENU_TEXT: [f32; 4] = [0.95, 0.95, 0.96, 1.0];
-pub const MENU_ITEM_PX: f32 = 16.0;
+pub const MENU_BG: [f32; 4] = [1.0, 1.0, 1.0, 0.98]; // white panel
+pub const MENU_HOVER: [f32; 4] = [0.0, 0.533, 1.0, 1.0]; // rgb(0,136,255) selection blue
+pub const MENU_TEXT: [f32; 4] = [0.09, 0.09, 0.09, 1.0]; // rgb(23,23,23)
+pub const MENU_TEXT_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 1.0]; // white on selection
+pub const MENU_ITEM_PX: f32 = 13.0;
 
 // --- Window manipulation ------------------------------------------------
 /// Grab band (px) inside a window's edges that starts an interactive resize.

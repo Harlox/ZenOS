@@ -359,9 +359,11 @@ impl Gpu {
                 let cly = cursor.1 - oy;
                 // Item labels (drawn first = on top of the panel/highlight).
                 for (i, label) in POWER_ITEMS.iter().enumerate() {
-                    let (ix, iy, _iw, ih) = power_menu_item_rect(i as i32);
+                    let (ix, iy, iw, ih) = power_menu_item_rect(i as i32);
+                    let hovered = clx >= ix && clx < ix + iw && cly >= iy && cly < iy + ih;
+                    let color = if hovered { MENU_TEXT_HOVER } else { MENU_TEXT };
                     let bl = iy + ih / 2 + (MENU_ITEM_PX as i32) / 3;
-                    for g in text.text(renderer, label, ix + 12, bl, MENU_ITEM_PX, MENU_TEXT) {
+                    for g in text.text(renderer, label, ix + 12, bl, MENU_ITEM_PX, color) {
                         overlay.push(ZenElement::Texture(g));
                     }
                 }
