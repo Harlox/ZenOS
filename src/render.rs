@@ -76,6 +76,12 @@ pub struct Surface {
     pub scene_tex: GlesTexture,
     /// Damage tracker for the offscreen scene pass.
     pub scene_damage: OutputDamageTracker,
+    /// `scene_tex` wrapped as a render-element buffer, cached so its element Id
+    /// stays stable across frames. Recreated only when the scene actually
+    /// changes (`scene_dirty`) or the size changes — so on cursor-only frames the
+    /// fullscreen scene blit reports no damage and the scanout only repaints the
+    /// cursor + dock region instead of the whole screen.
+    pub scene_buf: Option<TextureBuffer<GlesTexture>>,
 }
 
 /// One GPU: the DRM device, GBM allocator, GLES renderer, shaders, and one
@@ -176,6 +182,7 @@ impl Gpu {
         let Surface {
             scene_tex,
             scene_damage,
+            scene_buf,
             compositor,
             wallpaper,
             size,
@@ -338,8 +345,15 @@ impl Gpu {
         }
 
         // --- Pass 2: scanout — scene fullscreen + dock (frosted) + cursor ------
-        let scene_buf =
-            TextureBuffer::from_texture(&*renderer, scene_tex.clone(), 1, Transform::Normal, None);
+        // Reuse the cached scene buffer (stable element Id) unless the scene
+        // changed; a fresh buffer = fresh Id = the scanout treats the whole
+        // fullscreen blit as damaged. Keeping the Id stable on cursor-only frames
+        // lets the DrmCompositor repaint just the cursor/dock region.
+        if scene_dirty || shot || scene_buf.is_none() {
+            *scene_buf =
+                Some(TextureBuffer::from_texture(&*renderer, scene_tex.clone(), 1, Transform::Normal, None));
+        }
+        let scene_buf = scene_buf.as_ref().unwrap();
 
         let cursor_el = PixelShaderElement::new(
             rounded.clone(),
@@ -523,7 +537,7 @@ impl Gpu {
         let src = Rectangle::<f64, Logical>::new(Point::from((dock_x as f64, dock_y as f64)), Size::from((dw as f64, DOCK_H as f64)));
         let inner = TextureRenderElement::from_texture_buffer(
             Point::from((dock_x as f64, dock_y as f64)),
-            &scene_buf,
+            scene_buf,
             None,
             Some(src),
             Some(Size::from((dw, DOCK_H))),
@@ -547,7 +561,7 @@ impl Gpu {
         // Composed scene, fullscreen, at the bottom.
         overlay.push(ZenElement::Texture(TextureRenderElement::from_texture_buffer(
             Point::from((0.0, 0.0)),
-            &scene_buf,
+            scene_buf,
             None,
             None,
             None,

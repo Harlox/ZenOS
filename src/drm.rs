@@ -279,6 +279,7 @@ fn create_surface(
             wallpaper,
             scene_tex,
             scene_damage,
+            scene_buf: None,
         },
     );
     Ok(())
