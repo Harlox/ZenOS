@@ -89,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         window,
         keyboard: None,
+        qh: Some(qh.clone()),
         width: cols as u32 * font.cell_w as u32,
         height: rows as u32 * font.cell_h as u32,
         configured: false,
@@ -113,9 +114,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         ChannelEvent::Closed => state.exit = true,
     })?;
-
-    // The channel closure can't hold qh (borrow), so stash a clone for draws.
-    state.qh = Some(qh.clone());
 
     let signal = event_loop.get_signal();
     event_loop.run(None, &mut state, move |state| {
