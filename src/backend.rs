@@ -278,12 +278,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         g.last_size = (nw, nh);
                     }
                 }
-            } else if let Some(grab) = &data.move_grab {
-                let dx = (loc.x - grab.start_ptr.x) as i32;
-                let dy = (loc.y - grab.start_ptr.y) as i32;
-                let new = (grab.start_win.x + dx, grab.start_win.y + dy);
-                let window = grab.window.clone();
-                data.space.map_element(window, new, false);
+            } else if data.move_grab.is_some() {
+                // Don't reposition here: libinput motion fires ~1000Hz, far above
+                // the refresh. Just flag the scene dirty; render() applies the
+                // move once per frame from the latest pointer position (coalesced,
+                // lowest latency). See ZenState::apply_move_grab.
                 data.scene_dirty = true;
             } else {
                 // Resolve the surface under the pointer, popups + subsurfaces

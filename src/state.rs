@@ -150,10 +150,24 @@ impl ZenState {
     /// renderer fully re-composes each call, so we gate on dirty to avoid
     /// flipping every VBlank. Does NOT send frame callbacks — those go out on
     /// VBlank so clients are throttled to the monitor refresh.
+    /// Apply an active interactive move once, from the latest pointer position.
+    /// Called per frame (not per input event) so a 1000Hz mouse doesn't reposition
+    /// the window a thousand times between two vblanks — one map, freshest coords.
+    fn apply_move_grab(&mut self) {
+        if let Some(grab) = &self.move_grab {
+            let dx = (self.pointer_location.x - grab.start_ptr.x) as i32;
+            let dy = (self.pointer_location.y - grab.start_ptr.y) as i32;
+            let new = (grab.start_win.x + dx, grab.start_win.y + dy);
+            let window = grab.window.clone();
+            self.space.map_element(window, new, false);
+        }
+    }
+
     pub fn render(&mut self) {
         if !self.dirty {
             return;
         }
+        self.apply_move_grab();
         let shot = self.screenshot;
         let scene_dirty = self.scene_dirty;
         let menu_open = self.power_menu_open;
