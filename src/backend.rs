@@ -13,12 +13,12 @@ use std::time::Duration;
 
 use smithay::backend::drm::{DrmEvent, DrmNode};
 use smithay::backend::input::{
-    ButtonState, Event, InputEvent, KeyState, KeyboardKeyEvent, PointerButtonEvent,
-    PointerMotionEvent,
+    Axis, AxisSource, ButtonState, Event, InputEvent, KeyState, KeyboardKeyEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::input::keyboard::{keysyms, FilterResult, Keysym};
-use smithay::input::pointer::{ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::reexports::input::Libinput;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -554,6 +554,42 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     time,
                 },
             );
+            pointer.frame(data);
+        }
+        InputEvent::PointerAxis { event } => {
+            // Forward wheel + touchpad scroll to the focused client. Continuous
+            // (value) + discrete (v120) amounts, per smithay's pointer-axis API;
+            // a finger source with a 0 amount means scroll stopped.
+            let source = event.source();
+            let amount = |axis| {
+                event
+                    .amount(axis)
+                    .unwrap_or_else(|| event.amount_v120(axis).unwrap_or(0.0) * 3.0 / 120.0)
+            };
+            let (hv, vv) = (amount(Axis::Horizontal), amount(Axis::Vertical));
+            let mut frame = AxisFrame::new(event.time_msec()).source(source);
+            if hv != 0.0 {
+                frame = frame.value(Axis::Horizontal, hv);
+                if let Some(d) = event.amount_v120(Axis::Horizontal) {
+                    frame = frame.v120(Axis::Horizontal, d as i32);
+                }
+            }
+            if vv != 0.0 {
+                frame = frame.value(Axis::Vertical, vv);
+                if let Some(d) = event.amount_v120(Axis::Vertical) {
+                    frame = frame.v120(Axis::Vertical, d as i32);
+                }
+            }
+            if source == AxisSource::Finger {
+                if event.amount(Axis::Horizontal) == Some(0.0) {
+                    frame = frame.stop(Axis::Horizontal);
+                }
+                if event.amount(Axis::Vertical) == Some(0.0) {
+                    frame = frame.stop(Axis::Vertical);
+                }
+            }
+            let pointer = data.seat.get_pointer().unwrap();
+            pointer.axis(data, frame);
             pointer.frame(data);
         }
         _ => {}
