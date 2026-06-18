@@ -165,7 +165,7 @@ pub const BTN_LEFT: u32 = 0x110;
 // --- Server-side decorations (macOS-style) ------------------------------
 /// Titlebar height in px. Drawn above each toplevel's surface.
 pub const TITLEBAR_H: i32 = 28;
-pub const TITLEBAR_COLOR: [f32; 4] = [0.86, 0.86, 0.87, 0.94];
+pub const TITLEBAR_COLOR: [f32; 4] = [1.0, 1.0, 1.0, 1.0]; // full white
 pub const TITLEBAR_RADIUS: f32 = 10.0;
 /// Traffic-light buttons (close/min/max), left-aligned.
 pub const LIGHT_DIA: i32 = 13;

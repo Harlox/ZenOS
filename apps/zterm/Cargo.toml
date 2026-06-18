@@ -1,0 +1,21 @@
+[package]
+name = "zterm"
+version = "0.1.0"
+edition = "2021"
+description = "ZenOS native terminal — a Wayland client. Linux-only (PTY + Wayland)."
+
+[dependencies]
+# Wayland client: xdg-shell window + shm buffers + seat/keyboard. sctk 0.19
+# rides wayland-client 0.31, the same the compositor (smithay 0.7) speaks.
+smithay-client-toolkit = "0.19"
+wayland-client = "0.31"
+# calloop event loop + the wayland source adapter, so the PTY master fd and the
+# Wayland queue share one poll.
+calloop = "0.13"
+calloop-wayland-source = "0.3"
+# PTY: spawn $SHELL on a real pty, well-tested (wezterm's crate).
+portable-pty = "0.8"
+# Terminal state machine: parses ANSI/VT sequences into a cell grid.
+vt100 = "0.15"
+# CPU glyph rasterization (same crate the compositor uses), for the mono font.
+fontdue = "0.9"

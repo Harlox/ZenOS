@@ -1,3 +1,6 @@
+[workspace]
+members = ["apps/zterm"]
+
 [package]
 name = "zenos"
 version = "0.1.0"

@@ -159,12 +159,20 @@ fn load_font() -> Option<fontdue::Font> {
     }
     paths.extend(
         [
+            // Helvetica Neue look: prefer free Helvetica-metric clones first.
+            // Liberation Sans is TrueType (rasterizes cleanly in fontdue) and
+            // metric-compatible; Nimbus Sans / TeX Gyre Heros are closer clones.
+            "/usr/share/fonts/HelveticaNeue.ttf",
+            "/usr/share/fonts/TTF/HelveticaNeue.ttf",
+            "/usr/share/fonts/gsfonts/NimbusSans-Regular.otf",
+            "/usr/share/fonts/TTF/texgyreheros-regular.otf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
+            // Generic fallbacks.
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/TTF/Hack-Regular.ttf",
-            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/TTF/LiberationSans-Regular.ttf",
         ]
         .into_iter()
         .map(String::from),
