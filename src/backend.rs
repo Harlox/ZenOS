@@ -39,6 +39,8 @@ use crate::state::ZenState;
 
 use crate::config::*;
 
+use smithay::desktop::WindowSurfaceType;
+
 use crate::drm::{open_device, scan_connectors};
 use crate::layout::{dock_icon_pos, power_btn_rect, power_menu_item_rect};
 
@@ -284,10 +286,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 data.space.map_element(window, new, false);
                 data.scene_dirty = true;
             } else {
-                let focus = data
-                    .space
-                    .element_under(loc)
-                    .and_then(|(w, p)| w.toplevel().map(|t| (t.wl_surface().clone(), p.to_f64())));
+                // Resolve the surface under the pointer, popups + subsurfaces
+                // included (WindowSurfaceType::ALL). Popup focus is what lets an
+                // active PopupPointerGrab route motion into menu items; it only
+                // gates by client, so we must hand it the real popup surface.
+                let focus = {
+                    let mut found = None;
+                    for window in data.space.elements().rev() {
+                        let win_loc = data.space.element_location(window).unwrap_or_default();
+                        if let Some((surf, sloc)) =
+                            window.surface_under(loc - win_loc.to_f64(), WindowSurfaceType::ALL)
+                        {
+                            found = Some((surf, (sloc + win_loc).to_f64()));
+                            break;
+                        }
+                    }
+                    found
+                };
                 let pointer = data.seat.get_pointer().unwrap();
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = event.time_msec();

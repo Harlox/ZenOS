@@ -7,11 +7,13 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmNode};
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::surface::{
+    render_elements_from_surface_tree, WaylandSurfaceRenderElement,
+};
 use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
 use smithay::backend::renderer::gles::element::{PixelShaderElement, TextureShaderElement};
-use smithay::desktop::{Space, Window};
+use smithay::desktop::{PopupManager, Space, Window};
 use smithay::render_elements;
 use smithay::utils::{Scale, Transform};
 use smithay::backend::renderer::gles::{
@@ -280,6 +282,29 @@ impl Gpu {
                 }
 
                 scene.push(ZenElement::Ui(titlebar));
+            }
+
+            // Popups (menus, combo-boxes, tooltips) anchored to this window, drawn
+            // above its content. popups_for_surface yields the whole nested tree
+            // with offsets relative to the toplevel surface origin; subtract each
+            // popup's own geometry origin to land its top-left correctly.
+            if let Some(toplevel) = window.toplevel() {
+                for (popup, poffset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
+                    let off = Point::<i32, Logical>::from((lx, ly)) + poffset
+                        - popup.geometry().loc;
+                    let pels = render_elements_from_surface_tree::<
+                        _,
+                        WaylandSurfaceRenderElement<GlesRenderer>,
+                    >(
+                        renderer,
+                        popup.wl_surface(),
+                        off.to_physical_precise_round(1.0),
+                        scale,
+                        1.0,
+                        Kind::Unspecified,
+                    );
+                    scene.extend(pels.into_iter().map(ZenElement::Window));
+                }
             }
 
             let loc = Point::<i32, Logical>::from((lx, ly)).to_physical_precise_round(1.0);
