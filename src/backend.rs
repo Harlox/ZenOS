@@ -239,6 +239,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let (sw, sh) = grab.start_size;
                 let (sx, sy) = (grab.start_loc.x, grab.start_loc.y);
                 let (gl, gr, gt, gb) = (grab.left, grab.right, grab.top, grab.bottom);
+                let last = grab.last_size;
                 let window = grab.window.clone();
                 let mut nw = sw;
                 let mut nh = sh;
@@ -256,16 +257,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 nw = nw.max(WIN_MIN_W);
                 nh = nh.max(WIN_MIN_H);
-                // When dragging the left/top edge the origin moves with it, but
-                // stops once the window hits its minimum size.
-                let nx = if gl { sx + (sw - nw) } else { sx };
-                let ny = if gt { sy + (sh - nh) } else { sy };
-                if let Some(t) = window.toplevel() {
-                    t.with_pending_state(|s| s.size = Some((nw, nh).into()));
-                    t.send_configure();
+                // Skip when the target size is unchanged (most motions, since the
+                // client snaps to a grid): avoids a configure storm and jitter.
+                if (nw, nh) != last {
+                    // When dragging the left/top edge the origin moves with it, but
+                    // stops once the window hits its minimum size.
+                    let nx = if gl { sx + (sw - nw) } else { sx };
+                    let ny = if gt { sy + (sh - nh) } else { sy };
+                    if let Some(t) = window.toplevel() {
+                        t.with_pending_state(|s| s.size = Some((nw, nh).into()));
+                        t.send_configure();
+                    }
+                    data.space.map_element(window, (nx, ny), false);
+                    data.dirty = true;
+                    if let Some(g) = &mut data.resize_grab {
+                        g.last_size = (nw, nh);
+                    }
                 }
-                data.space.map_element(window, (nx, ny), false);
-                data.dirty = true;
             } else if let Some(grab) = &data.move_grab {
                 let dx = (loc.x - grab.start_ptr.x) as i32;
                 let dy = (loc.y - grab.start_ptr.y) as i32;
@@ -476,6 +484,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 start_ptr: loc,
                                 start_loc: wl_loc,
                                 start_size: (gs.w, gs.h),
+                                last_size: (gs.w, gs.h),
                                 left,
                                 right,
                                 top,

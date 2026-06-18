@@ -83,6 +83,9 @@ pub struct ResizeGrab {
     pub start_ptr: Point<f64, Logical>,
     pub start_loc: Point<i32, Logical>,
     pub start_size: (i32, i32),
+    /// Last size sent to the client, to skip duplicate configures (terminals
+    /// snap to a cell grid, so most motions don't change the size).
+    pub last_size: (i32, i32),
     pub left: bool,
     pub right: bool,
     pub top: bool,
