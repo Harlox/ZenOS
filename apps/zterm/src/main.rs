@@ -18,6 +18,7 @@ use smithay_client_toolkit::reexports::calloop::EventLoop;
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::seat::keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers};
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
 use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::xdg::window::{
     Window, WindowConfigure, WindowDecorations, WindowHandler,
@@ -27,11 +28,13 @@ use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shm::slot::SlotPool;
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::{
-    delegate_compositor, delegate_keyboard, delegate_output, delegate_registry, delegate_seat,
-    delegate_shm, delegate_xdg_shell, delegate_xdg_window, registry_handlers,
+    delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window, registry_handlers,
 };
 use wayland_client::globals::registry_queue_init;
-use wayland_client::protocol::{wl_keyboard::WlKeyboard, wl_seat::WlSeat, wl_shm, wl_surface::WlSurface};
+use wayland_client::protocol::{
+    wl_keyboard::WlKeyboard, wl_pointer::WlPointer, wl_seat::WlSeat, wl_shm, wl_surface::WlSurface,
+};
 use wayland_client::{Connection, QueueHandle};
 
 use font::Font;
@@ -89,7 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pool,
         window,
         keyboard: None,
+        pointer: None,
         mods: Modifiers::default(),
+        scroll_off: 0,
         qh: Some(qh.clone()),
         width: cols as u32 * font.cell_w as u32,
         height: rows as u32 * font.cell_h as u32,
@@ -98,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dirty: true,
         frame_pending: false,
         font,
-        parser: vt100::Parser::new(rows, cols, 0),
+        parser: vt100::Parser::new(rows, cols, SCROLLBACK_LINES),
         writer,
         pty,
         cols,
@@ -136,7 +141,10 @@ struct State {
     pool: SlotPool,
     window: Window,
     keyboard: Option<WlKeyboard>,
+    pointer: Option<WlPointer>,
     mods: Modifiers,
+    /// Current scrollback offset (0 = live bottom).
+    scroll_off: usize,
     qh: Option<QueueHandle<State>>,
 
     width: u32,
@@ -214,7 +222,22 @@ impl State {
         self.window.commit();
     }
 
+    /// Move the scrollback view. `up` rows toward history, `down` toward live.
+    fn scroll(&mut self, up: usize, down: usize) {
+        let off = (self.scroll_off + up).saturating_sub(down);
+        self.parser.set_scrollback(off);
+        // Re-read: set_scrollback clamps to the real history length.
+        self.scroll_off = self.parser.screen().scrollback();
+        self.dirty = true;
+    }
+
     fn on_key(&mut self, event: KeyEvent) {
+        // Typing returns to the live screen, like every terminal.
+        if self.scroll_off != 0 {
+            self.scroll_off = 0;
+            self.parser.set_scrollback(0);
+            self.dirty = true;
+        }
         let m = self.mods;
         // Named keys: fixed control sequences. Shift+Tab is back-tab (CBT).
         let named: Option<Vec<u8>> = match event.keysym {
@@ -292,8 +315,9 @@ fn render_grid(
             }
         }
     }
-    // Block cursor: dark fill, glyph redrawn white on top.
-    if !screen.hide_cursor() {
+    // Block cursor: dark fill, glyph redrawn white on top. Hidden while the
+    // user is scrolled up into history.
+    if !screen.hide_cursor() && screen.scrollback() == 0 {
         let (cr, cc) = screen.cursor_position();
         let x = cc as usize * cw;
         let y = cr as usize * ch;
@@ -312,6 +336,9 @@ fn render_grid(
 }
 
 const CORNER_RADIUS: usize = 10;
+const SCROLLBACK_LINES: usize = 10_000;
+/// Rows moved per wheel notch.
+const SCROLL_STEP: usize = 3;
 
 /// Make the two bottom corners transparent outside `r`, anti-aliased. Premultiplied
 /// alpha (wl_shm Argb8888), so partial-coverage pixels scale rgb by coverage too.
@@ -462,11 +489,19 @@ impl SeatHandler for State {
         if capability == Capability::Keyboard && self.keyboard.is_none() {
             self.keyboard = self.seat_state.get_keyboard(qh, &seat, None).ok();
         }
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+        }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: WlSeat, capability: Capability) {
         if capability == Capability::Keyboard {
             if let Some(kb) = self.keyboard.take() {
                 kb.release();
+            }
+        }
+        if capability == Capability::Pointer {
+            if let Some(p) = self.pointer.take() {
+                p.release();
             }
         }
     }
@@ -485,6 +520,39 @@ impl KeyboardHandler for State {
     }
 }
 
+impl PointerHandler for State {
+    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlPointer, events: &[PointerEvent]) {
+        let mut changed = false;
+        for e in events {
+            if let PointerEventKind::Axis { vertical, .. } = e.kind {
+                // Wayland convention: positive vertical = scroll down (toward live).
+                let (up, down) = if vertical.discrete != 0 {
+                    let s = vertical.discrete.unsigned_abs() as usize * SCROLL_STEP;
+                    if vertical.discrete < 0 {
+                        (s, 0)
+                    } else {
+                        (0, s)
+                    }
+                } else if vertical.absolute < 0.0 {
+                    (1, 0)
+                } else if vertical.absolute > 0.0 {
+                    (0, 1)
+                } else {
+                    (0, 0)
+                };
+                if up != 0 || down != 0 {
+                    self.scroll(up, down);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let qh = self.qh_dummy();
+            self.request_draw(&qh);
+        }
+    }
+}
+
 impl ProvidesRegistryState for State {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
@@ -497,6 +565,7 @@ delegate_output!(State);
 delegate_shm!(State);
 delegate_seat!(State);
 delegate_keyboard!(State);
+delegate_pointer!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_window!(State);
 delegate_registry!(State);
