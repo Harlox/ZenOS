@@ -27,6 +27,7 @@ use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode as CalloopMode, PostAction};
 use smithay::reexports::wayland_server::Display;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
 use smithay::utils::{Point, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::socket::ListeningSocketSource;
 
@@ -396,7 +397,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 .next()
                                 .and_then(|o| data.space.output_geometry(o));
                             if let Some(((rx, ry), (rw, rh))) = data.maximized.remove(&surf) {
-                                t.with_pending_state(|s| s.size = Some((rw, rh).into()));
+                                t.with_pending_state(|s| {
+                                    s.size = Some((rw, rh).into());
+                                    // Clear Maximized so the client restores its
+                                    // own decorations / margins.
+                                    s.states.unset(XdgState::Maximized);
+                                });
                                 t.send_configure();
                                 data.space.map_element(window.clone(), (rx, ry), false);
                             } else if let Some(geo) = out_geo {
@@ -404,7 +410,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 data.maximized.insert(surf, ((wl.x, wl.y), (cur.w, cur.h)));
                                 let mw = geo.size.w;
                                 let mh = geo.size.h - BAR_H - TITLEBAR_H;
-                                t.with_pending_state(|s| s.size = Some((mw, mh).into()));
+                                t.with_pending_state(|s| {
+                                    s.size = Some((mw, mh).into());
+                                    // Maximized tells the client to drop its CSD
+                                    // shadows/insets and fill the size exactly.
+                                    s.states.set(XdgState::Maximized);
+                                });
                                 t.send_configure();
                                 data.space.map_element(
                                     window.clone(),
