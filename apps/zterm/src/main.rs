@@ -94,6 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         height: rows as u32 * font.cell_h as u32,
         configured: false,
         exit: false,
+        dirty: true,
+        frame_pending: false,
         font,
         parser: vt100::Parser::new(rows, cols, 0),
         writer,
@@ -107,9 +109,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop_handle.insert_source(rx, move |event, _, state: &mut State| match event {
         ChannelEvent::Msg(bytes) => {
             state.parser.process(&bytes);
+            state.dirty = true;
             if state.configured {
                 let qh = state.qh_dummy();
-                state.draw(&qh);
+                state.request_draw(&qh);
             }
         }
         ChannelEvent::Closed => state.exit = true,
@@ -138,6 +141,11 @@ struct State {
     height: u32,
     configured: bool,
     exit: bool,
+    /// Content changed since the last paint.
+    dirty: bool,
+    /// A frame callback is in flight: don't paint again until it fires, so we
+    /// draw at most once per vblank instead of once per pty read.
+    frame_pending: bool,
 
     font: Font,
     parser: vt100::Parser,
@@ -165,7 +173,17 @@ impl State {
         }
     }
 
+    /// Paint only if nothing is already queued for this vblank. Coalesces a
+    /// burst of pty output into a single frame.
+    fn request_draw(&mut self, qh: &QueueHandle<State>) {
+        if self.configured && !self.frame_pending {
+            self.draw(qh);
+        }
+    }
+
     fn draw(&mut self, qh: &QueueHandle<State>) {
+        self.dirty = false;
+        self.frame_pending = true;
         let (w, h) = (self.width as usize, self.height as usize);
         self.scratch.resize(w * h, 0xffff_ffff);
         render_grid(
@@ -261,6 +279,38 @@ fn render_grid(
             }
         }
     }
+
+    // Bottom corners rounded (top corners stay square under the SSD titlebar).
+    round_bottom_corners(px, w, h, CORNER_RADIUS);
+}
+
+const CORNER_RADIUS: usize = 10;
+
+/// Make the two bottom corners transparent outside `r`, anti-aliased. Premultiplied
+/// alpha (wl_shm Argb8888), so partial-coverage pixels scale rgb by coverage too.
+fn round_bottom_corners(px: &mut [u32], w: usize, h: usize, r: usize) {
+    if r == 0 || w < 2 * r || h < r {
+        return;
+    }
+    let rf = r as f32;
+    for cy in 0..r {
+        let yb = h - 1 - cy;
+        for cx in 0..r {
+            let dx = rf - cx as f32 - 0.5;
+            let dy = rf - cy as f32 - 0.5;
+            let cov = (rf - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            if cov >= 1.0 {
+                continue;
+            }
+            for x in [cx, w - 1 - cx] {
+                let idx = yb * w + x;
+                let p = px[idx];
+                let a = (cov * 255.0) as u32;
+                let (pr, pg, pb) = ((p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff);
+                px[idx] = (a << 24) | ((pr * a / 255) << 16) | ((pg * a / 255) << 8) | (pb * a / 255);
+            }
+        }
+    }
 }
 
 fn fill_rect(px: &mut [u32], w: usize, h: usize, x: usize, y: usize, rw: usize, rh: usize, argb: u32) {
@@ -312,7 +362,10 @@ impl CompositorHandler for State {
     ) {
     }
     fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &WlSurface, _: u32) {
-        if self.configured {
+        // The buffer we attached has been shown; allow the next paint, and do it
+        // now only if content changed in the meantime.
+        self.frame_pending = false;
+        if self.dirty {
             self.draw(qh);
         }
     }
