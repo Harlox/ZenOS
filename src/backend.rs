@@ -174,6 +174,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 data.gpu = Some(gpu);
             }
             data.dirty = true;
+            data.scene_dirty = true;
             data.render();
         }
         UdevEvent::Added { device_id, .. } => tracing::debug!("udev add {device_id}"),
@@ -270,6 +271,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     data.space.map_element(window, (nx, ny), false);
                     data.dirty = true;
+                    data.scene_dirty = true;
                     if let Some(g) = &mut data.resize_grab {
                         g.last_size = (nw, nh);
                     }
@@ -280,6 +282,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let new = (grab.start_win.x + dx, grab.start_win.y + dy);
                 let window = grab.window.clone();
                 data.space.map_element(window, new, false);
+                data.scene_dirty = true;
             } else {
                 let focus = data
                     .space
@@ -307,6 +310,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let button_state = event.state();
             if button_state == ButtonState::Pressed {
                 let loc = data.pointer_location;
+                // A press can focus/raise/move/resize/maximize a window — all of
+                // which change the composed scene, so recompose this frame.
+                data.scene_dirty = true;
 
                 // Dock launch hit-test (icons live in each output's dock).
                 if button == BTN_LEFT {
@@ -518,6 +524,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Timer::from_duration(Duration::from_secs(1)),
         |_, _, data: &mut ZenState| {
             data.dirty = true; // clock may have ticked over
+            data.scene_dirty = true;
             data.render();
             TimeoutAction::ToDuration(Duration::from_secs(1))
         },

@@ -110,11 +110,17 @@ impl Gpu {
     /// Render every output that isn't mid-flip. Returns true if all outputs were
     /// rendered (none skipped for an in-flight flip), so the caller can clear the
     /// dirty flag.
-    pub fn render_all(&mut self, space: &Space<Window>, cursor: (i32, i32), shot: bool) -> bool {
+    pub fn render_all(
+        &mut self,
+        space: &Space<Window>,
+        cursor: (i32, i32),
+        shot: bool,
+        scene_dirty: bool,
+    ) -> bool {
         let crtcs: Vec<crtc::Handle> = self.surfaces.keys().copied().collect();
         let mut all_done = true;
         for crtc in crtcs {
-            match self.render_surface(crtc, space, cursor, shot) {
+            match self.render_surface(crtc, space, cursor, shot, scene_dirty) {
                 Ok(true) => self.frames += 1,
                 Ok(false) => all_done = false, // mid-flip; retry after its VBlank
                 Err(e) => tracing::error!("render surface failed: {e}"),
@@ -143,6 +149,7 @@ impl Gpu {
         space: &Space<Window>,
         cursor: (i32, i32),
         shot: bool,
+        scene_dirty: bool,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let Gpu {
             renderer,
@@ -295,8 +302,10 @@ impl Gpu {
             )));
         }
 
-        // Render the scene into scene_tex.
-        {
+        // Render the scene into scene_tex — only when the scene actually changed.
+        // On pure pointer motion the cached scene_tex is reused, so only the
+        // cheap scanout pass (cursor + dock) below runs.
+        if scene_dirty || shot {
             let mut fb = renderer.bind(&mut *scene_tex)?;
             scene_damage.render_output(renderer, &mut fb, 0, &scene, Color32F::from(CLEAR))?;
         }

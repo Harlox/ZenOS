@@ -28,6 +28,10 @@ pub struct ZenState {
     /// `render` only composes + flips when dirty, then clears it — this is what
     /// keeps the 2-pass renderer from flipping every VBlank.
     pub dirty: bool,
+    /// Set when the *scene* (wallpaper + windows + bar/clock) changed, as opposed
+    /// to just the cursor/dock overlay. Lets render skip the offscreen compose
+    /// pass on pure pointer motion and reuse the cached scene texture.
+    pub scene_dirty: bool,
     /// Set by F2: capture the next frame to /tmp/zenos-shot.png.
     pub screenshot: bool,
 
@@ -115,6 +119,7 @@ impl ZenState {
             running: true,
             start_time: Instant::now(),
             dirty: true,
+            scene_dirty: true,
             screenshot: false,
             session,
             gpu: None,
@@ -147,6 +152,7 @@ impl ZenState {
             return;
         }
         let shot = self.screenshot;
+        let scene_dirty = self.scene_dirty;
         let Self {
             gpu,
             space,
@@ -158,9 +164,10 @@ impl ZenState {
         let cursor = (pointer_location.x as i32, pointer_location.y as i32);
         // Clear dirty only if every output was rendered (none mid-flip); a
         // skipped output retries on its next VBlank-driven render.
-        let rendered = gpu.render_all(space, cursor, shot);
+        let rendered = gpu.render_all(space, cursor, shot, scene_dirty);
         if rendered {
             self.dirty = false;
+            self.scene_dirty = false;
         }
         if rendered || !shot {
             self.screenshot = false;
