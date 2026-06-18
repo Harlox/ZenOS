@@ -61,6 +61,10 @@ impl CompositorHandler for ZenState {
                 .cloned();
             if let Some(window) = window {
                 window.on_commit();
+                // If this commit is the response to an interactive resize, keep the
+                // non-dragged edge anchored using the size the client actually
+                // committed (prevents grid-snapping clients from jittering).
+                self.anchor_resize(&window);
                 // Center the window once, on its first sized commit; after that
                 // the user owns its position (don't yank it back to center).
                 let geo = window.geometry().size;

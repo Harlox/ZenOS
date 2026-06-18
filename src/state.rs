@@ -204,7 +204,6 @@ impl ZenState {
         let dx = (self.pointer_location.x - grab.start_ptr.x) as i32;
         let dy = (self.pointer_location.y - grab.start_ptr.y) as i32;
         let (sw, sh) = grab.start_size;
-        let (sx, sy) = (grab.start_loc.x, grab.start_loc.y);
         let (gl, gr, gt, gb) = (grab.left, grab.right, grab.top, grab.bottom);
         let last = grab.last_size;
         let window = grab.window.clone();
@@ -228,16 +227,40 @@ impl ZenState {
         if (nw, nh) == last {
             return;
         }
-        // Left/top edges move the origin as the size changes.
-        let nx = if gl { sx + (sw - nw) } else { sx };
-        let ny = if gt { sy + (sh - nh) } else { sy };
+        // Only request the new size. Position is handled on the client's commit
+        // (anchor_resize), using the size it actually committed — so a client that
+        // snaps to a grid (terminal) doesn't desync from a per-pixel origin and
+        // flicker. Right/bottom edges keep the origin fixed anyway.
         if let Some(t) = window.toplevel() {
             t.with_pending_state(|s| s.size = Some((nw, nh).into()));
             t.send_configure();
         }
-        self.space.map_element(window, (nx, ny), false);
         if let Some(g) = &mut self.resize_grab {
             g.last_size = (nw, nh);
+        }
+    }
+
+    /// Keep the non-dragged edge anchored after a resizing client commits its new
+    /// size. Called from the commit handler. For left/top drags the origin must
+    /// shift by the *actual* committed size (not the requested one), or a
+    /// grid-snapping client jitters.
+    pub fn anchor_resize(&mut self, window: &Window) {
+        let Some(grab) = self.resize_grab.as_ref() else {
+            return;
+        };
+        if &grab.window != window || !(grab.left || grab.top) {
+            return;
+        }
+        let (fixed_right, fixed_bottom) =
+            (grab.start_loc.x + grab.start_size.0, grab.start_loc.y + grab.start_size.1);
+        let (left, top) = (grab.left, grab.top);
+        let geo = window.geometry().size;
+        let cur = self.space.element_location(window).unwrap_or_default();
+        let nx = if left { fixed_right - geo.w } else { cur.x };
+        let ny = if top { fixed_bottom - geo.h } else { cur.y };
+        if (nx, ny) != (cur.x, cur.y) {
+            self.space.map_element(window.clone(), (nx, ny), false);
+            self.scene_dirty = true;
         }
     }
 
