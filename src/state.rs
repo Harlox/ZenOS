@@ -71,6 +71,8 @@ pub struct ZenState {
     pub placed: HashSet<WlSurface>,
     /// Maximized windows -> their pre-maximize (loc, size), for restore.
     pub maximized: HashMap<WlSurface, ((i32, i32), (i32, i32))>,
+    /// Top-bar power dropdown (Restart / Shut Down) open state.
+    pub power_menu_open: bool,
 }
 
 /// Tracks an interactive window move.
@@ -140,6 +142,7 @@ impl ZenState {
             resize_grab: None,
             placed: HashSet::new(),
             maximized: HashMap::new(),
+            power_menu_open: false,
         }
     }
 
@@ -153,6 +156,7 @@ impl ZenState {
         }
         let shot = self.screenshot;
         let scene_dirty = self.scene_dirty;
+        let menu_open = self.power_menu_open;
         let Self {
             gpu,
             space,
@@ -164,7 +168,7 @@ impl ZenState {
         let cursor = (pointer_location.x as i32, pointer_location.y as i32);
         // Clear dirty only if every output was rendered (none mid-flip); a
         // skipped output retries on its next VBlank-driven render.
-        let rendered = gpu.render_all(space, cursor, shot, scene_dirty);
+        let rendered = gpu.render_all(space, cursor, shot, scene_dirty, menu_open);
         if rendered {
             self.dirty = false;
             self.scene_dirty = false;

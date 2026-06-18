@@ -32,7 +32,7 @@ use crate::text::TextRenderer;
 
 use crate::config::*;
 use crate::shaders::*;
-use crate::layout::dock_icon_pos;
+use crate::layout::{dock_icon_pos, power_btn_rect, power_menu_item_rect, power_menu_rect};
 use crate::assets::ICON_TEX;
 
 /// The DrmCompositor type for one output: GBM allocator + GBM framebuffer
@@ -116,11 +116,12 @@ impl Gpu {
         cursor: (i32, i32),
         shot: bool,
         scene_dirty: bool,
+        menu_open: bool,
     ) -> bool {
         let crtcs: Vec<crtc::Handle> = self.surfaces.keys().copied().collect();
         let mut all_done = true;
         for crtc in crtcs {
-            match self.render_surface(crtc, space, cursor, shot, scene_dirty) {
+            match self.render_surface(crtc, space, cursor, shot, scene_dirty, menu_open) {
                 Ok(true) => self.frames += 1,
                 Ok(false) => all_done = false, // mid-flip; retry after its VBlank
                 Err(e) => tracing::error!("render surface failed: {e}"),
@@ -150,6 +151,7 @@ impl Gpu {
         cursor: (i32, i32),
         shot: bool,
         scene_dirty: bool,
+        menu_open: bool,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let Gpu {
             renderer,
@@ -329,6 +331,74 @@ impl Gpu {
 
         // Front-to-back overlay.
         let mut overlay: Vec<ZenElement> = vec![ZenElement::Ui(cursor_el)];
+
+        // Power button (top-left of the bar) + dropdown. Overlay-only, so opening
+        // it or hovering an item never triggers a scene recompose.
+        {
+            let (bx, by, bw, bh) = power_btn_rect();
+            let gw = text.measure(renderer, POWER_GLYPH, POWER_GLYPH_PX);
+            let gbl = by + bh / 2 + (POWER_GLYPH_PX as i32) / 3;
+            for g in text.text(renderer, POWER_GLYPH, bx + (bw - gw) / 2, gbl, POWER_GLYPH_PX, POWER_GLYPH_COLOR) {
+                overlay.push(ZenElement::Texture(g));
+            }
+            overlay.push(ZenElement::Ui(PixelShaderElement::new(
+                rounded.clone(),
+                Rectangle::new(Point::from((bx, by)), Size::from((bw, bh))),
+                None,
+                1.0,
+                vec![
+                    Uniform::new("u_color", POWER_BTN_BG),
+                    Uniform::new("u_radius", POWER_BTN_RADIUS),
+                    Uniform::new("u_size", [bw as f32, bh as f32]),
+                ],
+                Kind::Unspecified,
+            )));
+
+            if menu_open {
+                let clx = cursor.0 - ox;
+                let cly = cursor.1 - oy;
+                // Item labels (drawn first = on top of the panel/highlight).
+                for (i, label) in POWER_ITEMS.iter().enumerate() {
+                    let (ix, iy, _iw, ih) = power_menu_item_rect(i as i32);
+                    let bl = iy + ih / 2 + (MENU_ITEM_PX as i32) / 3;
+                    for g in text.text(renderer, label, ix + 12, bl, MENU_ITEM_PX, MENU_TEXT) {
+                        overlay.push(ZenElement::Texture(g));
+                    }
+                }
+                // Hover highlight (below labels, above the panel).
+                for i in 0..POWER_ITEMS.len() as i32 {
+                    let (ix, iy, iw, ih) = power_menu_item_rect(i);
+                    if clx >= ix && clx < ix + iw && cly >= iy && cly < iy + ih {
+                        overlay.push(ZenElement::Ui(PixelShaderElement::new(
+                            rounded.clone(),
+                            Rectangle::new(Point::from((ix, iy)), Size::from((iw, ih))),
+                            None,
+                            1.0,
+                            vec![
+                                Uniform::new("u_color", MENU_HOVER),
+                                Uniform::new("u_radius", MENU_ITEM_RADIUS),
+                                Uniform::new("u_size", [iw as f32, ih as f32]),
+                            ],
+                            Kind::Unspecified,
+                        )));
+                    }
+                }
+                // Panel background (bottom of the menu stack).
+                let (mx, my, mw, mh) = power_menu_rect();
+                overlay.push(ZenElement::Ui(PixelShaderElement::new(
+                    rounded.clone(),
+                    Rectangle::new(Point::from((mx, my)), Size::from((mw, mh))),
+                    None,
+                    1.0,
+                    vec![
+                        Uniform::new("u_color", MENU_BG),
+                        Uniform::new("u_radius", MENU_RADIUS),
+                        Uniform::new("u_size", [mw as f32, mh as f32]),
+                    ],
+                    Kind::Unspecified,
+                )));
+            }
+        }
 
         // Dock icons + separators (with hover magnification).
         let cursor_lx = cursor.0 - ox;

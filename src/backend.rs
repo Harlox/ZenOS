@@ -40,7 +40,7 @@ use crate::state::ZenState;
 use crate::config::*;
 
 use crate::drm::{open_device, scan_connectors};
-use crate::layout::dock_icon_pos;
+use crate::layout::{dock_icon_pos, power_btn_rect, power_menu_item_rect};
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // --- Step 1: session -----------------------------------------------------
@@ -313,6 +313,47 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // A press can focus/raise/move/resize/maximize a window — all of
                 // which change the composed scene, so recompose this frame.
                 data.scene_dirty = true;
+
+                // Power menu (top-left bar button + dropdown). Hit-tested first,
+                // in output-local coords, and consumes the click.
+                if button == BTN_LEFT {
+                    let (ox, oy) = data
+                        .gpu
+                        .as_ref()
+                        .and_then(|g| {
+                            g.surfaces.values().find_map(|s| {
+                                let (sx, sy) = s.location;
+                                let (sw, sh) = s.size;
+                                let (lx, ly) = (loc.x as i32, loc.y as i32);
+                                (lx >= sx && lx < sx + sw && ly >= sy && ly < sy + sh)
+                                    .then_some(s.location)
+                            })
+                        })
+                        .unwrap_or((0, 0));
+                    let lx = loc.x as i32 - ox;
+                    let ly = loc.y as i32 - oy;
+                    let (bx, by, bw, bh) = power_btn_rect();
+                    if lx >= bx && lx < bx + bw && ly >= by && ly < by + bh {
+                        data.power_menu_open = !data.power_menu_open;
+                        data.dirty = true;
+                        return;
+                    }
+                    if data.power_menu_open {
+                        for i in 0..POWER_ITEMS.len() as i32 {
+                            let (ix, iy, iw, ih) = power_menu_item_rect(i);
+                            if lx >= ix && lx < ix + iw && ly >= iy && ly < iy + ih {
+                                let cmd = if i == 0 { "reboot" } else { "poweroff" };
+                                tracing::info!("power menu: systemctl {cmd}");
+                                let _ = std::process::Command::new("systemctl").arg(cmd).spawn();
+                                break;
+                            }
+                        }
+                        // Any click while open dismisses it (and is consumed).
+                        data.power_menu_open = false;
+                        data.dirty = true;
+                        return;
+                    }
+                }
 
                 // Dock launch hit-test (icons live in each output's dock).
                 if button == BTN_LEFT {

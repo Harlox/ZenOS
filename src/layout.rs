@@ -33,3 +33,26 @@ pub fn dock_icon_pos(w: i32, h: i32, i: usize, n: usize) -> (i32, i32) {
     (x, y)
 }
 
+/// Power button rect (output-local, top-left of the bar): (x, y, w, h).
+/// Shared by the renderer and the click hit-test so they never drift.
+pub fn power_btn_rect() -> (i32, i32, i32, i32) {
+    (POWER_BTN_X, 0, POWER_BTN_W, BAR_H)
+}
+
+/// Dropdown panel rect (output-local): (x, y, w, h).
+pub fn power_menu_rect() -> (i32, i32, i32, i32) {
+    let n = POWER_ITEMS.len() as i32;
+    (MENU_X, BAR_H + MENU_GAP, MENU_W, MENU_PAD * 2 + n * MENU_ITEM_H)
+}
+
+/// Rect of dropdown item `i` (output-local): (x, y, w, h).
+pub fn power_menu_item_rect(i: i32) -> (i32, i32, i32, i32) {
+    let (mx, my, mw, _) = power_menu_rect();
+    (
+        mx + MENU_PAD,
+        my + MENU_PAD + i * MENU_ITEM_H,
+        mw - 2 * MENU_PAD,
+        MENU_ITEM_H,
+    )
+}
+

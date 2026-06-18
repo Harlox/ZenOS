@@ -34,6 +34,29 @@ pub const MAG_RADIUS: f32 = 110.0;
 /// Icon corner radius as a fraction of icon size (squircle-ish mask).
 pub const ICON_RADIUS_FRAC: f32 = 0.23;
 
+// --- Power menu (top-left bar button + dropdown) ------------------------
+pub const POWER_BTN_X: i32 = 6;
+pub const POWER_BTN_W: i32 = 40;
+pub const POWER_BTN_BG: [f32; 4] = [1.0, 1.0, 1.0, 0.10];
+pub const POWER_BTN_RADIUS: f32 = 8.0;
+/// Glyph drawn in the button. Falls back to a bare pill if the font lacks it.
+pub const POWER_GLYPH: &str = "\u{23FB}"; // ⏻ power symbol
+pub const POWER_GLYPH_PX: f32 = 18.0;
+pub const POWER_GLYPH_COLOR: [f32; 4] = [0.92, 0.92, 0.92, 1.0];
+/// Dropdown items, top to bottom. Index drives the action in the click handler.
+pub const POWER_ITEMS: [&str; 2] = ["Restart", "Shut Down"];
+pub const MENU_X: i32 = 6;
+pub const MENU_GAP: i32 = 4; // gap below the bar
+pub const MENU_W: i32 = 180;
+pub const MENU_ITEM_H: i32 = 30;
+pub const MENU_PAD: i32 = 6;
+pub const MENU_RADIUS: f32 = 10.0;
+pub const MENU_ITEM_RADIUS: f32 = 6.0;
+pub const MENU_BG: [f32; 4] = [0.20, 0.20, 0.22, 0.96];
+pub const MENU_HOVER: [f32; 4] = [0.20, 0.48, 0.95, 1.0]; // macOS selection blue
+pub const MENU_TEXT: [f32; 4] = [0.95, 0.95, 0.96, 1.0];
+pub const MENU_ITEM_PX: f32 = 16.0;
+
 // --- Window manipulation ------------------------------------------------
 /// Grab band (px) inside a window's edges that starts an interactive resize.
 pub const RESIZE_BORDER: i32 = 8;
