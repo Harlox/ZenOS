@@ -19,3 +19,6 @@ portable-pty = "0.8"
 vt100 = "0.15"
 # CPU glyph rasterization (same crate the compositor uses), for the mono font.
 fontdue = "0.9"
+# Safe reinterpret of the shm byte canvas as &mut [u32] (render straight into it,
+# no intermediate scratch buffer + copy).
+bytemuck = "1"

@@ -108,7 +108,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pty,
         cols,
         rows,
-        scratch: Vec::new(),
     };
 
     // Shell output → feed parser, repaint.
@@ -163,24 +162,11 @@ struct State {
     pty: Pty,
     cols: u16,
     rows: u16,
-    scratch: Vec<u32>,
 }
 
 impl State {
     fn qh_dummy(&self) -> QueueHandle<State> {
         self.qh.clone().expect("qh set after loop init")
-    }
-
-    /// Re-derive the grid from the pixel size and tell the pty + parser.
-    fn resize_grid(&mut self) {
-        let cols = (self.width as usize / self.font.cell_w).max(1) as u16;
-        let rows = (self.height as usize / self.font.cell_h).max(1) as u16;
-        if (cols, rows) != (self.cols, self.rows) {
-            self.cols = cols;
-            self.rows = rows;
-            self.parser.set_size(rows, cols);
-            self.pty.resize(rows, cols);
-        }
     }
 
     /// Paint only if nothing is already queued for this vblank. Coalesces a
@@ -195,25 +181,16 @@ impl State {
         self.dirty = false;
         self.frame_pending = true;
         let (w, h) = (self.width as usize, self.height as usize);
-        self.scratch.resize(w * h, 0xffff_ffff);
-        render_grid(
-            &mut self.font,
-            &self.parser,
-            self.rows,
-            self.cols,
-            &mut self.scratch,
-            w,
-            h,
-        );
 
         let stride = self.width as i32 * 4;
         let (buffer, canvas) = self
             .pool
             .create_buffer(self.width as i32, self.height as i32, stride, wl_shm::Format::Argb8888)
             .expect("create shm buffer");
-        for (px, chunk) in self.scratch.iter().zip(canvas.chunks_exact_mut(4)) {
-            chunk.copy_from_slice(&px.to_ne_bytes());
-        }
+        // Render straight into the shm canvas (Argb8888 = native-endian u32),
+        // no intermediate scratch buffer or per-pixel copy.
+        let px: &mut [u32] = bytemuck::cast_slice_mut(canvas);
+        render_grid(&mut self.font, &self.parser, self.rows, self.cols, px, w, h);
 
         let surface = self.window.wl_surface();
         surface.attach(Some(buffer.wl_buffer()), 0, 0);
@@ -465,10 +442,27 @@ impl WindowHandler for State {
         configure: WindowConfigure,
         _serial: u32,
     ) {
+        // Snap to whole cells: derive the grid from the requested pixel size and
+        // size our buffer to cols*cell x rows*cell. During a drag the compositor
+        // sends a configure per pixel, but the grid only changes every cell_w /
+        // cell_h pixels — skip the rest so we don't realloc + reflow + repaint on
+        // every sub-cell step (that was the resize lag). Compositor places the
+        // slightly-smaller buffer; the window settles on cell boundaries.
         let (wo, ho) = configure.new_size;
-        self.width = wo.map(|v| v.get()).unwrap_or(self.width);
-        self.height = ho.map(|v| v.get()).unwrap_or(self.height);
-        self.resize_grid();
+        let req_w = wo.map(|v| v.get()).unwrap_or(self.width);
+        let req_h = ho.map(|v| v.get()).unwrap_or(self.height);
+        let cols = (req_w as usize / self.font.cell_w).max(1) as u16;
+        let rows = (req_h as usize / self.font.cell_h).max(1) as u16;
+        let unchanged = self.configured && cols == self.cols && rows == self.rows;
+        self.cols = cols;
+        self.rows = rows;
+        self.width = cols as u32 * self.font.cell_w as u32;
+        self.height = rows as u32 * self.font.cell_h as u32;
+        if unchanged {
+            return; // grid identical to last frame: nothing to realloc or redraw
+        }
+        self.parser.set_size(rows, cols);
+        self.pty.resize(rows, cols);
         self.configured = true;
         self.draw(qh);
     }
