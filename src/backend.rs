@@ -409,7 +409,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 let cur = window.geometry().size;
                                 data.maximized.insert(surf, ((wl.x, wl.y), (cur.w, cur.h)));
                                 let mw = geo.size.w;
-                                let mh = geo.size.h - BAR_H - TITLEBAR_H;
+                                // Reserve the top bar + SSD titlebar above and the
+                                // floating dock (height + its bottom margin) below.
+                                let mh =
+                                    geo.size.h - BAR_H - TITLEBAR_H - DOCK_H - DOCK_MARGIN;
                                 t.with_pending_state(|s| {
                                     s.size = Some((mw, mh).into());
                                     // Maximized tells the client to drop its CSD
